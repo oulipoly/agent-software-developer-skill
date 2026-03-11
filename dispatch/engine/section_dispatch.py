@@ -1,33 +1,23 @@
-import json
-import subprocess
 from pathlib import Path
-from typing import Any
 
 from dispatch.engine import agent_executor
 from staleness.service.change_tracker import check_pending as alignment_changed_pending
 from signals.service.database_client import DatabaseClient
-from dispatch.helpers.utils import (
-    check_agent_signals,
-    summarize_output,
-    write_model_choice_signal,
-)
 from dispatch.repository.metadata import write_dispatch_metadata
-from dispatch.service.model_policy import load_model_policy
 from dispatch.service.monitor_service import MonitorService
 from orchestrator.path_registry import PathRegistry
-from signals.repository.signal_reader import read_agent_signal, read_signal_tuple
 
-from dispatch.prompt.template import render_template
+from dispatch.prompt.template import SRC_TEMPLATE_DIR, load_template, render, render_template
 from dispatch.service.prompt_safety import validate_dynamic_content
 from signals.service.communication import (
     AGENT_NAME,
     DB_SH,
-    WORKFLOW_HOME,
     _log_artifact,
     log,
 )
 from orchestrator.service.context_assembly import materialize_context_sidecar
 from orchestrator.service.pipeline_control import wait_if_paused
+from taskrouter.agents import resolve_agent_path
 
 
 def _database_client(planspace: Path) -> DatabaseClient:
@@ -37,7 +27,6 @@ def _database_client(planspace: Path) -> DatabaseClient:
 def _monitor_service(planspace: Path) -> MonitorService:
     return MonitorService(
         _database_client(planspace),
-        Path(WORKFLOW_HOME),
         AGENT_NAME,
         logger=log,
     )
@@ -72,9 +61,7 @@ def dispatch_agent(model: str, prompt_path: Path, output_path: Path,
             "agent_file is required — every dispatch must have "
             "behavioral constraints"
         )
-    agent_path = Path(WORKFLOW_HOME) / "agents" / agent_file
-    if not agent_path.exists():
-        raise FileNotFoundError(f"Agent file not found: {agent_path}")
+    agent_path = resolve_agent_path(agent_file)
     if planspace and parent:
         wait_if_paused(planspace, parent)
         # If alignment_changed was received during the pause (or was
@@ -149,7 +136,6 @@ def dispatch_agent(model: str, prompt_path: Path, output_path: Path,
             agent=AGENT_NAME,
             check=False,
         )
-    agent_executor.WORKFLOW_HOME = Path(WORKFLOW_HOME)
     run_result = agent_executor.run_agent(
         model,
         prompt_path,
@@ -192,55 +178,14 @@ def _write_agent_monitor_prompt(
     db_path = paths.run_db()
     prompt_path = paths.artifacts / f"{monitor_name}-prompt.md"
 
-    dynamic_body = f"""# Agent Monitor: {agent_name}
-
-## Your Job
-Watch mailbox `{agent_name}` for messages from a running agent.
-Detect if the agent is looping (repeating the same actions).
-Report loops by logging signal events to the database.
-
-## Setup
-```bash
-bash "{DB_SH}" register "{db_path}" {monitor_name}
-```
-
-## Paths
-- Planspace: `{planspace}`
-- Database: `{db_path}`
-- Agent mailbox to watch: `{agent_name}`
-- Your mailbox: `{monitor_name}`
-
-## Monitor Loop
-1. Drain all messages from `{agent_name}` mailbox
-2. Track "plan:" messages in memory
-3. If you see the same plan repeated (same action on same file) → loop detected
-4. Check your own mailbox for `agent-finished` signal → exit
-5. Wait 10 seconds, repeat
-
-## Loop Detection
-Keep a list of all `plan:` messages received. If a new `plan:` message
-is substantially similar to a previous one (same file, same action),
-the agent is looping.
-
-**Agent self-reported loop:** If ANY drained message starts with
-`LOOP_DETECTED:`, the agent has self-detected a loop. Immediately log
-that payload as a signal event and exit — no further analysis needed.
-
-When loop detected (either self-reported or by your analysis), log a
-signal event:
-```bash
-bash "{DB_SH}" log "{db_path}" signal {agent_name} "LOOP_DETECTED:{agent_name}:<repeated action>" --agent {monitor_name}
-```
-
-Do NOT send loop signals via mailbox — only log signal events as above.
-
-## Exit Conditions
-- Receive `agent-finished` on your mailbox → exit normally
-- 5 minutes with no messages from agent → log stalled warning, then exit:
-  ```bash
-  bash "{DB_SH}" log "{db_path}" signal {agent_name} "STALLED:{agent_name}:no messages for 5 minutes" --agent {monitor_name}
-  ```
-"""
+    template = load_template("dispatch/agent-monitor.md", SRC_TEMPLATE_DIR)
+    dynamic_body = render(template, {
+        "agent_name": agent_name,
+        "monitor_name": monitor_name,
+        "db_sh": str(DB_SH),
+        "db_path": str(db_path),
+        "planspace": str(planspace),
+    })
     violations = validate_dynamic_content(dynamic_body)
     if violations:
         from signals.service.communication import log
@@ -252,111 +197,3 @@ Do NOT send loop signals via mailbox — only log signal events as above.
     )
     _log_artifact(planspace, f"prompt:agent-monitor-{agent_name}")
     return prompt_path
-
-
-def adjudicate_agent_output(
-    output_path: Path, planspace: Path, parent: str,
-    codespace: Path | None = None,
-    *,
-    model: str,
-) -> tuple[str | None, str]:
-    """Dispatch state-adjudicator to classify ambiguous agent output.
-
-    Used when structured signal file is absent but output may contain
-    signals. Returns (signal_type, detail) or (None, "").
-    """
-    paths = PathRegistry(planspace)
-    artifacts = paths.artifacts
-    artifacts.mkdir(parents=True, exist_ok=True)
-    adj_prompt = artifacts / "adjudicate-prompt.md"
-    adj_output = artifacts / "adjudicate-output.md"
-
-    dynamic_body = f"""# Classify Agent Output
-
-Read the agent output file and determine its state.
-
-## Agent Output File
-`{output_path}`
-
-## Instructions
-
-Classify the output into exactly one state. Reply with a JSON block:
-
-```json
-{{
-  "state": "<STATE>",
-  "detail": "<brief explanation>"
-}}
-```
-
-States: ALIGNED, PROBLEMS, UNDERSPECIFIED, NEED_DECISION, DEPENDENCY,
-LOOP_DETECTED, NEEDS_PARENT, OUT_OF_SCOPE, COMPLETED, UNKNOWN.
-"""
-    violations = validate_dynamic_content(dynamic_body)
-    if violations:
-        from signals.service.communication import log
-        log(f"  ERROR: adjudicate prompt blocked — dynamic violations: {violations}")
-        return None, ""
-    adj_prompt.write_text(
-        render_template(
-            "adjudicate", dynamic_body,
-            file_paths=[str(output_path)],
-        ),
-        encoding="utf-8",
-    )
-
-    result = dispatch_agent(
-        model, adj_prompt, adj_output,
-        planspace, parent, codespace=codespace,
-        agent_file="state-adjudicator.md",
-    )
-    if result == "ALIGNMENT_CHANGED_PENDING":
-        return None, "ALIGNMENT_CHANGED_PENDING"
-
-    # Parse JSON from adjudicator output
-    try:
-        json_start = result.find("{")
-        json_end = result.rfind("}")
-        if json_start >= 0 and json_end > json_start:
-            data = json.loads(result[json_start:json_end + 1])
-            state = data.get("state", "").lower()
-            detail = data.get("detail", "")
-            if state in ("underspecified", "underspec"):
-                return "underspec", detail
-            if state == "need_decision":
-                return "need_decision", detail
-            if state == "dependency":
-                return "dependency", detail
-            if state == "loop_detected":
-                return "loop_detected", detail
-            if state == "needs_parent":
-                return "needs_parent", detail
-            if state in ("out_of_scope", "out-of-scope"):
-                return "out_of_scope", detail
-    except (json.JSONDecodeError, KeyError) as exc:
-        print(
-            f"[ADJUDICATOR][WARN] Malformed adjudicator verdict JSON "
-            f"({exc}) — treating as unrecognized signal",
-        )
-    return None, ""
-
-
-def create_signal_template(section: str, state: str, detail: str = "",
-                           **extra: Any) -> dict[str, Any]:
-    """Create a standardized signal dict for agent output.
-
-    Agents should include this JSON in their output for reliable
-    state classification. Scripts read JSON — agents decide semantics.
-    """
-    signal: dict[str, Any] = {
-        "state": state,
-        "section": section,
-        "detail": detail,
-    }
-    signal.update(extra)
-    return signal
-
-
-def read_model_policy(planspace: Path) -> dict[str, Any]:
-    """Read model policy from artifacts/model-policy.json."""
-    return load_model_policy(planspace)

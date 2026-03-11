@@ -9,39 +9,21 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    from dispatch.service.prompt_safety import validate_dynamic_content, write_validated_prompt
-except ModuleNotFoundError:  # pragma: no cover - test package import path
-    from src.scripts.prompt_safety import validate_dynamic_content, write_validated_prompt
-
-try:
-    from signals.service.communication import (
-        AGENT_NAME,
-        DB_SH,
-        WORKFLOW_HOME,
-        _log_artifact,
-        log,
-    )
-    from orchestrator.service.context_assembly import materialize_context_sidecar
-    from dispatch.engine.section_dispatch import dispatch_agent
-except ModuleNotFoundError:  # pragma: no cover - test package import path
-    from src.signals.section_loop_communication import (
-        AGENT_NAME,
-        DB_SH,
-        WORKFLOW_HOME,
-        _log_artifact,
-        log,
-    )
-    from src.orchestrator.context_assembly import materialize_context_sidecar
-    from src.dispatch.section_dispatch import dispatch_agent
-
+from dispatch.service.prompt_safety import validate_dynamic_content, write_validated_prompt
+from signals.service.communication import (
+    AGENT_NAME,
+    DB_SH,
+    _log_artifact,
+    log,
+)
+from orchestrator.service.context_assembly import materialize_context_sidecar
+from dispatch.engine.section_dispatch import dispatch_agent
 from orchestrator.path_registry import PathRegistry
+from taskrouter.agents import resolve_agent_path
+from taskrouter import agent_for
 
 if TYPE_CHECKING:
-    try:
-        from orchestrator.types import Section
-    except ModuleNotFoundError:  # pragma: no cover - test package import path
-        from src.orchestrator.types import Section
+    from orchestrator.types import Section
 
 MaterialImpact = tuple[str, str, bool, str]
 
@@ -226,7 +208,7 @@ This is the primary content of the consequence note the target receives.
         return []
 
     sidecar_path = materialize_context_sidecar(
-        str(Path(WORKFLOW_HOME) / "agents" / "impact-analyzer.md"),
+        str(resolve_agent_path("impact-analyzer.md")),
         planspace,
         section=section_number,
     )
@@ -274,7 +256,7 @@ This is the primary content of the consequence note the target receives.
         parent,
         codespace=codespace,
         section_number=section_number,
-        agent_file="impact-analyzer.md",
+        agent_file=agent_for("signals.impact_analysis"),
     )
 
     sec_num_map = build_section_number_map(all_sections)
@@ -344,7 +326,7 @@ If no material impacts can be extracted, reply:
         parent,
         codespace=codespace,
         section_number=section_number,
-        agent_file="impact-output-normalizer.md",
+        agent_file=agent_for("signals.impact_normalize"),
     )
     impacted_sections = _parse_material_impacts(normalize_result, sec_num_map)
     if impacted_sections is None:

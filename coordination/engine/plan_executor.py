@@ -11,12 +11,14 @@ from signals.repository.artifact_io import read_json, write_json
 from staleness.helpers.hashing import content_hash
 from dispatch.service.model_policy import resolve
 from orchestrator.path_registry import PathRegistry
+from dispatch.prompt.template import SRC_TEMPLATE_DIR, load_template, render
 from dispatch.service.prompt_safety import write_validated_prompt
 from signals.service.communication import log, mailbox_send
-from coordination.engine.execution import _dispatch_fix_group
+from coordination.engine.fix_dispatch import _dispatch_fix_group
 from dispatch.engine.section_dispatch import dispatch_agent
 from orchestrator.service.pipeline_control import poll_control_messages
 from orchestrator.types import Section
+from taskrouter import agent_for
 
 
 class CoordinationExecutionExit(Exception):
@@ -208,23 +210,20 @@ def _run_bridge_for_group(
         f"- `{notes_dir / f'from-bridge-{group_index}-to-{section_num}.md'}`"
         for section_num in group_sections
     )
-    bridge_prompt_text = (
-        f"# Bridge: Resolve Cross-Section Friction "
-        f"(Group {group_index})\n\n"
-        f"## Trigger Reason\n{bridge_reason}\n\n"
-        f"## Sections in Conflict\n{section_refs}\n\n"
-        f"## Alignment Excerpts\n{alignment_refs}\n\n"
-        f"## Integration Proposals\n{proposal_refs}\n\n"
-        f"## Shared Files\n"
-        + "\n".join(f"- `{file_path}`" for file_path in group_files)
-        + consequence_block
-        + f"\n\n## Output\n"
-        f"Write your contract patch to: `{contract_path}`\n"
-        f"Write a contract delta summary to: `{contract_delta_path}`\n"
-        f"Write per-section consequence notes to:\n"
-        + note_output_refs
-        + "\n"
-    )
+    shared_files_list = "\n".join(f"- `{fp}`" for fp in group_files)
+    template = load_template("coordination/bridge-resolve.md", SRC_TEMPLATE_DIR)
+    bridge_prompt_text = render(template, {
+        "group_index": str(group_index),
+        "bridge_reason": bridge_reason,
+        "section_refs": section_refs,
+        "alignment_refs": alignment_refs,
+        "proposal_refs": proposal_refs,
+        "shared_files": shared_files_list,
+        "consequence_block": consequence_block,
+        "contract_path": str(contract_path),
+        "contract_delta_path": str(contract_delta_path),
+        "note_output_refs": note_output_refs,
+    })
     if not write_validated_prompt(bridge_prompt_text, bridge_prompt):
         return
     log(
@@ -240,7 +239,7 @@ def _run_bridge_for_group(
         planspace,
         parent,
         codespace=codespace,
-        agent_file="bridge-agent.md",
+        agent_file=agent_for("coordination.bridge"),
     )
 
     paths.contracts_dir().mkdir(parents=True, exist_ok=True)
@@ -256,7 +255,7 @@ def _run_bridge_for_group(
             planspace,
             parent,
             codespace=codespace,
-            agent_file="bridge-agent.md",
+            agent_file=agent_for("coordination.bridge"),
         )
     if not contract_delta_path.exists():
         log(
