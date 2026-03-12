@@ -32,7 +32,13 @@ def read_json(path: Path) -> dict | list | None:
 
 
 def write_json(path: Path, data: object, *, indent: int = 2) -> None:
-    """Write data as JSON to a file. Creates parent directories."""
+    """Write data as JSON to a file. Creates parent directories.
+
+    Accepts pydantic models (converted via ``model_dump()``), dicts,
+    lists, and other JSON-serializable objects.
+    """
+    if hasattr(data, "model_dump"):
+        data = data.model_dump()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(data, indent=indent) + "\n",
@@ -55,6 +61,13 @@ def rename_malformed(path: Path) -> Path | None:
     except OSError as exc:
         logger.warning("Failed to rename malformed file %s: %s", path, exc)
         return None
+
+
+def read_if_exists(path: Path) -> str:
+    """Return file contents as a string, or empty string if the file does not exist."""
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
 
 
 def read_json_or_default(path: Path, default: object) -> dict | list:
