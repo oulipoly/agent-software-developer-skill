@@ -9,27 +9,27 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-from intake.service.assessment import promote_debt_signals
+from intake.service.assessment_evaluator import promote_debt_signals
 from intake.repository.loader import bootstrap_governance_if_missing, build_governance_indexes
-from coordination.engine.loop import run_coordination_loop
-from implementation.engine.implementation_pass import (
+from coordination.engine.coordination_controller import run_coordination_loop
+from implementation.engine.implementation_phase import (
     ImplementationPassExit,
     ImplementationPassRestart,
     run_implementation_pass,
 )
 from orchestrator.path_registry import PathRegistry
 from scan.service.project_mode import resolve_project_mode, write_mode_contract
-from proposal.engine.proposal_pass import ProposalPassExit, run_proposal_pass
-from reconciliation.engine.phase import ReconciliationPhaseExit, run_reconciliation_phase
+from proposal.engine.proposal_phase import ProposalPassExit, run_proposal_pass
+from reconciliation.engine.reconciliation_phase import ReconciliationPhaseExit, run_reconciliation_phase
 from scan.service.section_loader import load_sections
 
 from _config import AGENT_NAME, DB_SH
-from signals.service.communication import (
+from signals.service.section_communicator import (
     mailbox_cleanup,
     mailbox_register,
 )
 from containers import Services
-from orchestrator.engine.strategic_state import build_strategic_state
+from orchestrator.engine.strategic_state_builder import build_strategic_state
 from orchestrator.types import SectionResult
 
 
