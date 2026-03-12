@@ -5,10 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, write_json
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import log
-from orchestrator.service.pipeline_control import pause_for_parent
+from containers import Services
 
 
 @dataclass(frozen=True)
@@ -27,7 +25,7 @@ def _read_project_mode_signal(
     post_resume: bool,
 ) -> ProjectMode:
     if mode_json_path.exists():
-        mode_data = read_json(mode_json_path)
+        mode_data = Services.artifact_io().read_json(mode_json_path)
         if mode_data is not None:
             return ProjectMode(
                 mode=str(mode_data.get("mode", "unknown")),
@@ -35,7 +33,7 @@ def _read_project_mode_signal(
                 reason="JSON signal (post-resume)" if post_resume else "JSON signal",
             )
 
-        log(
+        Services.logger().log(
             "project-mode.json malformed"
             + (" after resume" if post_resume else "")
             + " — preserved as .malformed.json, trying text fallback",
@@ -77,17 +75,17 @@ def resolve_project_mode(planspace: Path, parent: str) -> tuple[str, list[str]]:
 
     if pm.reason == "default":
         if mode_json_path.exists():
-            log("No text fallback — pausing for parent (fail-closed)")
-            pause_for_parent(
+            Services.logger().log("No text fallback — pausing for parent (fail-closed)")
+            Services.pipeline_control().pause_for_parent(
                 planspace,
                 parent,
                 "pause:needs_parent:project-mode-malformed — "
                 "JSON parse failed and no text fallback exists",
             )
         else:
-            log("No project-mode signal found — pausing for parent "
+            Services.logger().log("No project-mode signal found — pausing for parent "
                 "(fail-closed)")
-            pause_for_parent(
+            Services.pipeline_control().pause_for_parent(
                 planspace,
                 parent,
                 "pause:needs_parent:project-mode-missing — "
@@ -100,7 +98,7 @@ def resolve_project_mode(planspace: Path, parent: str) -> tuple[str, list[str]]:
             post_resume=True,
         )
 
-    log(f"Project mode: {pm.mode} (from {pm.reason})")
+    Services.logger().log(f"Project mode: {pm.mode} (from {pm.reason})")
     return pm.mode, pm.evidence_files
 
 
@@ -111,7 +109,7 @@ def write_mode_contract(
 ) -> None:
     """Write the formalized project-mode contract artifact."""
     paths = PathRegistry(planspace)
-    write_json(
+    Services.artifact_io().write_json(
         paths.mode_contract(),
         {
             "mode": mode,

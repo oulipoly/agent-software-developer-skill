@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, rename_malformed, write_json
-from staleness.helpers.hashing import content_hash
+from containers import Services
 from orchestrator.path_registry import PathRegistry
 
 _TERMINAL_RESEARCH_STATES = frozenset({"synthesized", "verified", "failed"})
@@ -14,38 +13,38 @@ _TERMINAL_RESEARCH_STATES = frozenset({"synthesized", "verified", "failed"})
 def compute_trigger_hash(questions: list[str]) -> str:
     """Hash the current set of blocking research questions."""
     combined = "|".join(sorted(str(question) for question in questions))
-    return content_hash(combined)
+    return Services.hasher().content_hash(combined)
 
 
 def load_research_status(section_number: str, planspace: Path) -> dict | None:
     """Load research-status.json with corruption preservation."""
     status_path = PathRegistry(planspace).research_status(section_number)
-    data = read_json(status_path)
+    data = Services.artifact_io().read_json(status_path)
     if data is None:
         return None
     if not isinstance(data, dict):
-        rename_malformed(status_path)
+        Services.artifact_io().rename_malformed(status_path)
         return None
     if "section" not in data or "status" not in data:
-        rename_malformed(status_path)
+        Services.artifact_io().rename_malformed(status_path)
         return None
     return data
 
 
 def validate_research_plan(plan_path: Path) -> dict | None:
     """Validate research-plan.json. Preserves corrupt files."""
-    plan = read_json(plan_path)
+    plan = Services.artifact_io().read_json(plan_path)
     if plan is None:
         return None
     if not isinstance(plan, dict):
-        rename_malformed(plan_path)
+        Services.artifact_io().rename_malformed(plan_path)
         return None
     required = ("section", "tickets", "flow")
     if not all(k in plan for k in required):
-        rename_malformed(plan_path)
+        Services.artifact_io().rename_malformed(plan_path)
         return None
     if not isinstance(plan["tickets"], list):
-        rename_malformed(plan_path)
+        Services.artifact_io().rename_malformed(plan_path)
         return None
     return plan
 
@@ -64,7 +63,7 @@ def write_research_status(
     research_dir = paths.research_section_dir(section_number)
     research_dir.mkdir(parents=True, exist_ok=True)
     status_path = paths.research_status(section_number)
-    write_json(
+    Services.artifact_io().write_json(
         status_path,
         {
             "section": section_number,

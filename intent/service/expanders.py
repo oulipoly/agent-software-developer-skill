@@ -5,11 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
-from intent.service.philosophy import validate_philosophy_grounding
-from signals.service.communication import _log_artifact, log
-from taskrouter import agent_for
+from intent.service.philosophy_bootstrap import validate_philosophy_grounding
 
 
 def run_problem_expander(
@@ -87,7 +84,7 @@ materially changed (new constraints, new success criteria).
 """
     if not Services.prompt_guard().write_validated(expand_prompt_text, prompt_path):
         return None
-    _log_artifact(planspace, f"prompt:problem-expand-{section_number}")
+    Services.communicator().log_artifact(planspace, f"prompt:problem-expand-{section_number}")
 
     result = Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"intent_problem_expander"),
@@ -97,7 +94,7 @@ materially changed (new constraints, new success criteria).
         parent,
         codespace=codespace,
         section_number=section_number,
-        agent_file=agent_for("intent.problem_expander"),
+        agent_file=Services.task_router().agent_for("intent.problem_expander"),
     )
 
     if result == "ALIGNMENT_CHANGED_PENDING":
@@ -176,7 +173,7 @@ Validate each philosophy surface and classify it:
 """
     if not Services.prompt_guard().write_validated(phil_expand_text, prompt_path):
         return None
-    _log_artifact(planspace, f"prompt:philosophy-expand-{section_number}")
+    Services.communicator().log_artifact(planspace, f"prompt:philosophy-expand-{section_number}")
 
     result = Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"intent_philosophy_expander"),
@@ -186,7 +183,7 @@ Validate each philosophy surface and classify it:
         parent,
         codespace=codespace,
         section_number=section_number,
-        agent_file=agent_for("intent.philosophy_expander"),
+        agent_file=Services.task_router().agent_for("intent.philosophy_expander"),
     )
 
     if result == "ALIGNMENT_CHANGED_PENDING":
@@ -200,7 +197,7 @@ Validate each philosophy surface and classify it:
             artifacts,
         )
         if not grounding_ok:
-            log(f"Section {section_number}: philosophy expansion broke "
+            Services.logger().log(f"Section {section_number}: philosophy expansion broke "
                 f"grounding — expansion accepted but grounding warning "
                 f"emitted (fail-closed)")
 
@@ -238,7 +235,7 @@ def adjudicate_recurrence(
     recurrence_path = (
         signals_dir / f"intent-surface-recurrence-{section_number}.json"
     )
-    write_json(recurrence_path, recurrence_signal)
+    Services.artifact_io().write_json(recurrence_path, recurrence_signal)
 
     adjudication_path = (
         signals_dir / f"intent-recurrence-adjudication-{section_number}.json"
@@ -273,7 +270,7 @@ Write a JSON signal to: `{adjudication_path}`
 """
     if not Services.prompt_guard().write_validated(recurrence_prompt_text, prompt_path):
         return []
-    _log_artifact(planspace, f"prompt:recurrence-adjudicate-{section_number}")
+    Services.communicator().log_artifact(planspace, f"prompt:recurrence-adjudicate-{section_number}")
 
     Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"intent_recurrence_adjudicator"),
@@ -283,17 +280,17 @@ Write a JSON signal to: `{adjudication_path}`
         parent,
         codespace=codespace,
         section_number=section_number,
-        agent_file=agent_for("intent.recurrence_adjudicator"),
+        agent_file=Services.task_router().agent_for("intent.recurrence_adjudicator"),
     )
 
     result = Services.signals().read(adjudication_path)
     if result:
         reopen = result.get("reopen_ids", [])
         if reopen:
-            log(f"Section {section_number}: adjudicator reopened "
+            Services.logger().log(f"Section {section_number}: adjudicator reopened "
                 f"{len(reopen)} surface(s): {reopen}")
         return reopen
 
-    log(f"Section {section_number}: recurrence adjudication signal "
+    Services.logger().log(f"Section {section_number}: recurrence adjudication signal "
         f"missing — keeping surfaces discarded (fail-closed)")
     return []

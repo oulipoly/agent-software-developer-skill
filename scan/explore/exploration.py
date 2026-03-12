@@ -13,10 +13,8 @@ from scan.related.discovery import (
     validate_existing_related_files,
 )
 
-from dispatch.service.prompt_guard import validate_dynamic_content
-
 from scan.cli_dispatch import dispatch_agent, read_scan_model_policy
-from taskrouter import agent_for
+from containers import Services
 
 
 def run_section_exploration(
@@ -95,7 +93,7 @@ def _explore_section(
         section_file=section_file,
         corrections_signal=corrections_signal,
     )
-    violations = validate_dynamic_content(prompt)
+    violations = Services.prompt_guard().validate_dynamic(prompt)
     if violations:
         log_phase_failure(
             "quick-explore",
@@ -110,7 +108,7 @@ def _explore_section(
         model=model_policy["exploration"],
         project=codespace,
         prompt_file=prompt_file,
-        agent_file=agent_for("scan.explore"),
+        agent_file=Services.task_router().agent_for("scan.explore"),
         stdout_file=response_file,
         stderr_file=stderr_file,
     )

@@ -5,15 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import read_json, rename_malformed, write_json
 from orchestrator.repository.decisions import Decision, load_decisions, record_decision
 from orchestrator.path_registry import PathRegistry
 from implementation.service.scope_delta_parser import (
     normalize_section_id,
     parse_scope_delta_adjudication,
 )
-from signals.service.communication import _log_artifact, log, mailbox_send
-from taskrouter import agent_for
 
 
 class ScopeDeltaAggregationExit(Exception):
@@ -28,13 +25,13 @@ def _load_pending_deltas(scope_deltas_dir: Path) -> tuple[list[Path], list[dict]
     )
     pending_deltas: list[dict] = []
     for delta_file in delta_files:
-        delta = read_json(delta_file)
+        delta = Services.artifact_io().read_json(delta_file)
         if delta is not None:
             if delta.get("adjudicated"):
                 continue
             pending_deltas.append(delta)
         else:
-            log(
+            Services.logger().log(
                 f"  coordinator: WARNING — malformed scope-delta "
                 f"{delta_file.name}, preserving as .malformed.json",
             )
@@ -55,7 +52,7 @@ def _write_adjudication_prompt(
             delta.get("requires_root_reframing", False),
         )
         prompt_deltas.append(prompt_delta)
-    write_json(pending_deltas_path, prompt_deltas)
+    Services.artifact_io().write_json(pending_deltas_path, prompt_deltas)
 
     prompt_text = f"""# Task: Adjudicate Scope Deltas
 
@@ -109,7 +106,7 @@ def _dispatch_adjudication(
     adjudication_prompt: Path,
     adjudication_output: Path,
 ) -> dict | None:
-    _log_artifact(planspace, "prompt:scope-delta-adjudication")
+    Services.communicator().log_artifact(planspace, "prompt:scope-delta-adjudication")
 
     adjudication_result = Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"coordination_plan"),
@@ -117,7 +114,7 @@ def _dispatch_adjudication(
         adjudication_output,
         planspace,
         parent,
-        agent_file=agent_for("coordination.plan"),
+        agent_file=Services.task_router().agent_for("coordination.plan"),
     )
     if adjudication_result == "ALIGNMENT_CHANGED_PENDING":
         raise ScopeDeltaAggregationExit
@@ -126,7 +123,7 @@ def _dispatch_adjudication(
     if adj_data is not None:
         return adj_data
 
-    log("  coordinator: scope-delta adjudication parse "
+    Services.logger().log("  coordinator: scope-delta adjudication parse "
         "failed — retrying with escalation model")
     retry_prompt = adjudication_prompt.with_name("scope-delta-prompt-retry.md")
     retry_prompt.write_text(
@@ -141,7 +138,7 @@ def _dispatch_adjudication(
         retry_output,
         planspace,
         parent,
-        agent_file=agent_for("coordination.plan"),
+        agent_file=Services.task_router().agent_for("coordination.plan"),
     )
     if retry_result == "ALIGNMENT_CHANGED_PENDING":
         raise ScopeDeltaAggregationExit
@@ -152,7 +149,7 @@ def _dispatch_adjudication(
 def _build_delta_id_map(delta_files: list[Path]) -> dict[str, Path]:
     delta_id_to_path: dict[str, Path] = {}
     for delta_file in delta_files:
-        delta = read_json(delta_file)
+        delta = Services.artifact_io().read_json(delta_file)
         if isinstance(delta, dict):
             delta_id = delta.get("delta_id")
             if delta_id:
@@ -176,16 +173,16 @@ def _apply_adjudication(
         delta_path = scope_deltas_dir / f"section-{section}-scope-delta.json"
 
     if delta_path.exists():
-        delta = read_json(delta_path)
+        delta = Services.artifact_io().read_json(delta_path)
         if delta is None:
-            log(
+            Services.logger().log(
                 f"  coordinator: WARNING — malformed scope-delta "
                 f"{delta_path.name} during adjudication application, "
                 "preserving as .malformed.json",
             )
             malformed = delta_path.with_suffix(".malformed.json")
-            rename_malformed(delta_path)
-            write_json(
+            Services.artifact_io().rename_malformed(delta_path)
+            Services.artifact_io().write_json(
                 delta_path,
                 {
                     "delta_id": delta_id,
@@ -200,14 +197,14 @@ def _apply_adjudication(
                     "preserved_path": str(malformed),
                 },
             )
-            log(f"  coordinator: scope delta {delta_id or delta_path.name} → {action}")
+            Services.logger().log(f"  coordinator: scope delta {delta_id or delta_path.name} → {action}")
             return
 
         delta["adjudicated"] = True
         delta["adjudication"] = decision
-        write_json(delta_path, delta)
+        Services.artifact_io().write_json(delta_path, delta)
 
-    log(f"  coordinator: scope delta {delta_id or delta_path.name} → {action}")
+    Services.logger().log(f"  coordinator: scope delta {delta_id or delta_path.name} → {action}")
 
 
 def _record_decisions(
@@ -219,8 +216,8 @@ def _record_decisions(
 ) -> None:
     paths = PathRegistry(planspace)
     decisions_rollup_path = paths.coordination_dir() / "scope-delta-decisions.json"
-    write_json(decisions_rollup_path, {"decisions": decisions})
-    _log_artifact(planspace, "coordination:scope-delta-decisions")
+    Services.artifact_io().write_json(decisions_rollup_path, {"decisions": decisions})
+    Services.communicator().log_artifact(planspace, "coordination:scope-delta-decisions")
 
     decisions_dir = paths.decisions_dir()
     for decision in decisions:
@@ -229,7 +226,7 @@ def _record_decisions(
         action = decision.get("action", "")
         reason = decision.get("reason", "")
         label = delta_id or section
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"summary:scope-delta:{label}:{action}:{reason[:150]}",
@@ -268,7 +265,7 @@ def aggregate_scope_deltas(
     if not pending_deltas:
         return []
 
-    log(
+    Services.logger().log(
         f"  coordinator: {len(pending_deltas)} pending scope "
         f"deltas — dispatching adjudicator",
     )
@@ -284,9 +281,9 @@ def aggregate_scope_deltas(
         adjudication_output,
     )
     if adj_data is None:
-        log("  coordinator: scope-delta adjudication parse "
+        Services.logger().log("  coordinator: scope-delta adjudication parse "
             "failed after retry — fail closed")
-        write_json(
+        Services.artifact_io().write_json(
             paths.coordination_dir() / "scope-delta-adjudication-failure.json",
             {
                 "error": "unparseable_adjudication_json",
@@ -295,7 +292,7 @@ def aggregate_scope_deltas(
                 "attempts": 2,
             },
         )
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             "fail:coordination:unparseable_scope_delta_adjudication",

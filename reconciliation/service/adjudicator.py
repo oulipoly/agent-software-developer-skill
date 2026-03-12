@@ -7,10 +7,8 @@ import logging
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
-from dispatch.prompt.template import render_template
-from taskrouter import agent_for
+from pipeline.template import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,7 @@ def adjudicate_ungrouped_candidates(
 
     recon_dir = PathRegistry(planspace).reconciliation_dir()
     candidates_path = recon_dir / f"ungrouped-{candidate_type}.json"
-    write_json(candidates_path, ungrouped)
+    Services.artifact_io().write_json(candidates_path, ungrouped)
 
     dynamic_body = f"""# Reconciliation Adjudication: {candidate_type}
 
@@ -83,7 +81,7 @@ group's `members` array or in the `separate` array.
             prompt_path,
             output_path,
             planspace=planspace,
-            agent_file=agent_for("reconciliation.adjudicate"),
+            agent_file=Services.task_router().agent_for("reconciliation.adjudicate"),
         )
     except Exception:
         logger.warning(

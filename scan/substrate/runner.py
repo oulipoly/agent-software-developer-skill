@@ -16,7 +16,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json
 from orchestrator.path_registry import PathRegistry
 from scan.substrate.dispatch import dispatch_substrate_agent as _dispatch_agent
 from scan.substrate.helpers import (
@@ -27,7 +26,6 @@ from scan.substrate.helpers import (
     write_status as _write_status,
 )
 from scan.substrate.policy import (
-    DEFAULT_TRIGGER_THRESHOLD as _DEFAULT_TRIGGER_THRESHOLD,
     read_substrate_model_policy as _read_model_policy,
     read_trigger_signals as _read_trigger_signals,
     read_trigger_threshold as _read_trigger_threshold,
@@ -40,7 +38,7 @@ from scan.substrate.prompt_builder import (
 )
 from scan.substrate.related_files import apply_related_files_updates
 from scan.substrate.schemas import read_seed_plan_failclosed, read_shard_failclosed
-from taskrouter import agent_for
+from containers import Services
 
 
 # ---- Main orchestration ----
@@ -201,7 +199,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
             prompt_path=prompt_path,
             output_path=output_path,
             codespace=codespace,
-            agent_file=agent_for("scan.substrate_shard"),
+            agent_file=Services.task_router().agent_for("scan.substrate_shard"),
         )
 
         # Validate the shard was produced and is well-formed
@@ -249,7 +247,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
         prompt_path=pruner_prompt,
         output_path=pruner_output,
         codespace=codespace,
-        agent_file=agent_for("scan.substrate_prune"),
+        agent_file=Services.task_router().agent_for("scan.substrate_prune"),
     )
 
     substrate_dir = registry.substrate_dir()
@@ -287,7 +285,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
 
     # Check prune-signal.json for NEEDS_PARENT
     if prune_signal_path.is_file():
-        prune_signal = read_json(prune_signal_path)
+        prune_signal = Services.artifact_io().read_json(prune_signal_path)
         if isinstance(prune_signal, dict):
             status_val = prune_signal.get("state", "").upper()
             if status_val == "NEEDS_PARENT":
@@ -322,7 +320,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
         prompt_path=seeder_prompt,
         output_path=seeder_output,
         codespace=codespace,
-        agent_file=agent_for("scan.substrate_seed"),
+        agent_file=Services.task_router().agent_for("scan.substrate_seed"),
     )
 
     if not seeder_ok:
@@ -332,7 +330,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
     # Verify seed-signal.json completion marker
     seed_signal_path = substrate_dir / "seed-signal.json"
     if seed_signal_path.is_file():
-        seed_signal = read_json(seed_signal_path)
+        seed_signal = Services.artifact_io().read_json(seed_signal_path)
         if isinstance(seed_signal, dict):
             print(
                 f"[SUBSTRATE] Seed signal: "

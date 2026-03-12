@@ -1,18 +1,15 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, write_json
-from staleness.helpers.hashing import file_hash
+from containers import Services
 from orchestrator.path_registry import PathRegistry
 
-from staleness.service.section_alignment import _parse_alignment_verdict
-from signals.service.communication import log
 from orchestrator.types import Section
 
 
 def _file_sha256(path: Path) -> str:
     """Return hex SHA-256 of a file, or empty string if missing."""
-    return file_hash(path)
+    return Services.hasher().file_hash(path)
 
 
 def _proposal_governance_ids(planspace: Path, section_number: str) -> dict:
@@ -71,7 +68,7 @@ def _write_traceability_index(
         if not output_path.exists():
             continue
         text = output_path.read_text(encoding="utf-8")
-        verdict = _parse_alignment_verdict(text)
+        verdict = Services.section_alignment().parse_alignment_verdict(text)
         if verdict is not None:
             problems = verdict.get("problems", [])
             problems_count = (len(problems) if isinstance(problems, list)
@@ -124,14 +121,14 @@ def _write_traceability_index(
         "alignment_verdicts": alignment_verdicts,
         "governance": {
             "packet_path": str(paths.governance_packet(sec)),
-            "packet_hash": file_hash(paths.governance_packet(sec)),
+            "packet_hash": Services.hasher().file_hash(paths.governance_packet(sec)),
             **_proposal_governance_ids(planspace, sec),
         },
     }
 
     trace_path = trace_dir / f"section-{sec}.json"
-    write_json(trace_path, index)
-    log(f"Section {sec}: traceability index written to {trace_path}")
+    Services.artifact_io().write_json(trace_path, index)
+    Services.logger().log(f"Section {sec}: traceability index written to {trace_path}")
 
 
 def update_trace_governance(
@@ -145,7 +142,7 @@ def update_trace_governance(
     """Update governance fields in an existing trace index."""
     paths = PathRegistry(planspace)
     trace_path = paths.trace_dir() / f"section-{section_number}.json"
-    data = read_json(trace_path)
+    data = Services.artifact_io().read_json(trace_path)
     if not isinstance(data, dict):
         return False
 
@@ -173,7 +170,7 @@ def update_trace_governance(
                 merged_pattern_ids.append(value)
 
     governance["packet_path"] = str(paths.governance_packet(section_number))
-    governance["packet_hash"] = file_hash(paths.governance_packet(section_number))
+    governance["packet_hash"] = Services.hasher().file_hash(paths.governance_packet(section_number))
     governance["problem_ids"] = merged_problem_ids
     governance["pattern_ids"] = merged_pattern_ids
     if profile_id is not None:
@@ -182,7 +179,7 @@ def update_trace_governance(
         governance.setdefault("profile_id", "")
 
     data["governance"] = governance
-    write_json(trace_path, data)
+    Services.artifact_io().write_json(trace_path, data)
     return True
 
 
@@ -205,7 +202,7 @@ def _verify_traceability(planspace: Path, section_number: str) -> list[str]:
         violations.append(f"Traceability index missing: {trace_path}")
         return violations
 
-    index = read_json(trace_path)
+    index = Services.artifact_io().read_json(trace_path)
     if index is None:
         violations.append(f"Traceability index unreadable: {trace_path}")
         return violations

@@ -6,11 +6,9 @@ Translates the post-scan feedback collection and routing from scan.sh.
 from __future__ import annotations
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, write_json
 from orchestrator.path_registry import PathRegistry
 from scan.service.feedback_router import (
     _append_to_log,
-    _extract_section_number,
     _is_valid_updater_signal,
     _route_scope_deltas,
     _validate_feedback_schema,
@@ -18,10 +16,8 @@ from scan.service.feedback_router import (
 from scan.related.discovery import apply_related_files_update
 from scan.service.template_loader import load_scan_template
 
-from dispatch.service.prompt_guard import validate_dynamic_content
-
 from scan.cli_dispatch import dispatch_agent, read_scan_model_policy
-from taskrouter import agent_for
+from containers import Services
 
 
 def collect_and_route_feedback(
@@ -58,7 +54,7 @@ def collect_and_route_feedback(
         out_of_scope_items: list[str] = []
 
         for fb_file in sorted(sec_log_dir.glob("deep-*-feedback.json")):
-            data = read_json(fb_file)
+            data = Services.artifact_io().read_json(fb_file)
             if data is None:
                 print(
                     f"[DEEP SCAN] WARNING: Malformed feedback JSON: "
@@ -180,7 +176,7 @@ def _apply_feedback(
         all_irrelevant: list[str] = []
 
         for fb_file in sorted(sec_log_dir.glob("deep-*-feedback.json")):
-            data = read_json(fb_file)
+            data = Services.artifact_io().read_json(fb_file)
             if data is None:
                 print(
                     f"[FEEDBACK][WARN] Malformed feedback JSON in "
@@ -255,7 +251,7 @@ def _apply_feedback(
             irrelevant_section=irrelevant_section,
             updater_signal=updater_signal,
         )
-        violations = validate_dynamic_content(prompt)
+        violations = Services.prompt_guard().validate_dynamic(prompt)
         if violations:
             print(
                 f"[FEEDBACK] {sec_name}: updater prompt blocked — "
@@ -270,7 +266,7 @@ def _apply_feedback(
             model=updater_model,
             project=codespace,
             prompt_file=updater_prompt,
-            agent_file=agent_for("scan.adjudicate"),
+            agent_file=Services.task_router().agent_for("scan.adjudicate"),
             stdout_file=updater_output,
         )
 
@@ -289,7 +285,7 @@ def _apply_feedback(
                 model=escalation_model,
                 project=codespace,
                 prompt_file=updater_prompt,
-                agent_file=agent_for("scan.adjudicate"),
+                agent_file=Services.task_router().agent_for("scan.adjudicate"),
                 stdout_file=updater_output,
             )
             valid_signal = (
@@ -307,7 +303,7 @@ def _apply_feedback(
                 )
             continue
 
-        sig_data = read_json(updater_signal)
+        sig_data = Services.artifact_io().read_json(updater_signal)
         if sig_data is None:
             print(
                 f"[FEEDBACK][WARN] Malformed updater signal: "
@@ -323,7 +319,7 @@ def _apply_feedback(
             # re-applied on subsequent runs.
             try:
                 sig_data["status"] = "applied" if applied else "no_change"
-                write_json(updater_signal, sig_data)
+                Services.artifact_io().write_json(updater_signal, sig_data)
             except OSError:
                 pass  # Best-effort ack; signal file may be read-only
             if applied:

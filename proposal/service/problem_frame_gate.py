@@ -4,17 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import write_json
 from proposal.repository.excerpts import exists as excerpt_exists
-from staleness.helpers.hashing import file_hash
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import _record_traceability, log, mailbox_send
 from containers import Services
 from dispatch.prompt.writers import write_section_setup_prompt
 from signals.service.blockers import _update_blocker_rollup
 from implementation.service.reexplore import _write_alignment_surface
 from orchestrator.types import Section
-from taskrouter import agent_for
 
 
 def validate_problem_frame(
@@ -28,7 +24,7 @@ def validate_problem_frame(
     paths = PathRegistry(planspace)
     problem_frame_path = paths.problem_frame(section.number)
     if not problem_frame_path.exists():
-        log(f"Section {section.number}: problem frame missing — retrying setup once")
+        Services.logger().log(f"Section {section.number}: problem frame missing — retrying setup once")
         retry_prompt = write_section_setup_prompt(
             section,
             planspace,
@@ -46,13 +42,13 @@ def validate_problem_frame(
             f"setup-{section.number}-retry",
             codespace=codespace,
             section_number=section.number,
-            agent_file=agent_for("proposal.section_setup"),
+            agent_file=Services.task_router().agent_for("proposal.section_setup"),
         )
         if retry_result == "ALIGNMENT_CHANGED_PENDING":
             return None
 
     if not problem_frame_path.exists():
-        log(
+        Services.logger().log(
             f"Section {section.number}: problem frame still missing after retry "
             "— emitting needs_parent signal",
         )
@@ -77,7 +73,7 @@ def validate_problem_frame(
             },
         )
         _update_blocker_rollup(planspace)
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"pause:needs_parent:{section.number}:problem frame missing after retry",
@@ -86,7 +82,7 @@ def validate_problem_frame(
 
     pf_content = problem_frame_path.read_text(encoding="utf-8").strip()
     if not pf_content:
-        log(f"Section {section.number}: problem frame is empty")
+        Services.logger().log(f"Section {section.number}: problem frame is empty")
         _write_problem_frame_signal(
             paths.setup_signal(section.number),
             {
@@ -102,28 +98,28 @@ def validate_problem_frame(
             },
         )
         _update_blocker_rollup(planspace)
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"pause:needs_parent:{section.number}:problem frame empty",
         )
         return None
 
-    log(f"Section {section.number}: problem frame present and validated")
+    Services.logger().log(f"Section {section.number}: problem frame present and validated")
     pf_hash_path = paths.problem_frame_hash(section.number)
     pf_hash_path.parent.mkdir(parents=True, exist_ok=True)
-    current_pf_hash = file_hash(problem_frame_path)
+    current_pf_hash = Services.hasher().file_hash(problem_frame_path)
     if pf_hash_path.exists():
         prev_pf_hash = pf_hash_path.read_text(encoding="utf-8").strip()
         if prev_pf_hash != current_pf_hash:
-            log(
+            Services.logger().log(
                 f"Section {section.number}: problem frame changed — forcing "
                 "integration proposal re-run",
             )
             existing_proposal = paths.proposal(section.number)
             if existing_proposal.exists():
                 existing_proposal.unlink()
-                log(
+                Services.logger().log(
                     f"Section {section.number}: invalidated existing integration "
                     "proposal due to problem frame change",
                 )
@@ -133,15 +129,15 @@ def validate_problem_frame(
         excerpt_exists(planspace, section.number, "proposal")
         and excerpt_exists(planspace, section.number, "alignment")
     ):
-        log(f"Section {section.number}: setup — excerpts ready")
-        _record_traceability(
+        Services.logger().log(f"Section {section.number}: setup — excerpts ready")
+        Services.communicator().record_traceability(
             planspace,
             section.number,
             f"section-{section.number}-proposal-excerpt.md",
             str(section.global_proposal_path),
             "excerpt extraction from global proposal",
         )
-        _record_traceability(
+        Services.communicator().record_traceability(
             planspace,
             section.number,
             f"section-{section.number}-alignment-excerpt.md",
@@ -155,4 +151,4 @@ def validate_problem_frame(
 
 def _write_problem_frame_signal(signal_path: Path, payload: dict) -> None:
     signal_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(signal_path, payload)
+    Services.artifact_io().write_json(signal_path, payload)

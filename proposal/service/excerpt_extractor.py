@@ -2,21 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json_or_default, write_json
-from staleness.service.change_tracker import check_pending as alignment_changed_pending
 from proposal.repository.excerpts import exists as excerpt_exists
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import mailbox_send, log
-from coordination.service.cross_section import persist_decision
 from containers import Services
-from dispatch.helpers.utils import check_agent_signals, summarize_output
-from orchestrator.service.pipeline_control import pause_for_parent
 from dispatch.prompt.writers import write_section_setup_prompt
 from signals.service.blockers import (
     _append_open_problem,
     _update_blocker_rollup,
 )
-from taskrouter import agent_for
 
 
 def extract_excerpts(
@@ -35,7 +28,7 @@ def extract_excerpts(
         not excerpt_exists(planspace, section.number, "proposal")
         or not excerpt_exists(planspace, section.number, "alignment")
     ):
-        log(f"Section {section.number}: setup — extracting excerpts")
+        Services.logger().log(f"Section {section.number}: setup — extracting excerpts")
         setup_prompt = write_section_setup_prompt(
             section,
             planspace,
@@ -54,17 +47,17 @@ def extract_excerpts(
             setup_agent,
             codespace=codespace,
             section_number=section.number,
-            agent_file=agent_for("proposal.section_setup"),
+            agent_file=Services.task_router().agent_for("proposal.section_setup"),
         )
         if output == "ALIGNMENT_CHANGED_PENDING":
             return None
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
-            f"summary:setup:{section.number}:{summarize_output(output)}",
+            f"summary:setup:{section.number}:{Services.dispatch_helpers().summarize_output(output)}",
         )
 
-        signal, detail = check_agent_signals(
+        signal, detail = Services.dispatch_helpers().check_agent_signals(
             output,
             signal_path=signal_dir / f"setup-{section.number}-signal.json",
             output_path=setup_output,
@@ -75,7 +68,7 @@ def extract_excerpts(
         if signal:
             if signal in ("needs_parent", "out_of_scope"):
                 _append_open_problem(planspace, section.number, detail, signal)
-                mailbox_send(
+                Services.communicator().mailbox_send(
                     planspace,
                     parent,
                     f"open-problem:{section.number}:{signal}:{detail[:200]}",
@@ -84,7 +77,7 @@ def extract_excerpts(
                 scope_delta_dir = paths.scope_deltas_dir()
                 scope_delta_dir.mkdir(parents=True, exist_ok=True)
                 setup_sig_path = signal_dir / f"setup-{section.number}-signal.json"
-                signal_payload = read_json_or_default(setup_sig_path, {})
+                signal_payload = Services.artifact_io().read_json_or_default(setup_sig_path, {})
                 scope_delta = {
                     "delta_id": f"delta-{section.number}-setup-oos",
                     "section": section.number,
@@ -94,12 +87,12 @@ def extract_excerpts(
                     "signal_path": str(setup_sig_path),
                     "signal_payload": signal_payload,
                 }
-                write_json(
+                Services.artifact_io().write_json(
                     scope_delta_dir / f"section-{section.number}-scope-delta.json",
                     scope_delta,
                 )
             _update_blocker_rollup(planspace)
-            response = pause_for_parent(
+            response = Services.pipeline_control().pause_for_parent(
                 planspace,
                 parent,
                 f"pause:{signal}:{section.number}:{detail}",
@@ -108,8 +101,8 @@ def extract_excerpts(
                 return None
             payload = response.partition(":")[2].strip()
             if payload:
-                persist_decision(planspace, section.number, payload)
-            if alignment_changed_pending(planspace):
+                Services.cross_section().persist_decision(planspace, section.number, payload)
+            if Services.pipeline_control().alignment_changed_pending(planspace):
                 return None
             continue
 
@@ -117,11 +110,11 @@ def extract_excerpts(
             not excerpt_exists(planspace, section.number, "proposal")
             or not excerpt_exists(planspace, section.number, "alignment")
         ):
-            log(
+            Services.logger().log(
                 f"Section {section.number}: ERROR — setup failed to create "
                 f"excerpt files"
             )
-            mailbox_send(
+            Services.communicator().mailbox_send(
                 planspace,
                 parent,
                 f"fail:{section.number}:setup failed to create excerpt files",

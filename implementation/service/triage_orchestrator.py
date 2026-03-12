@@ -6,16 +6,8 @@ import re
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import read_json, read_json_or_default, write_json
 from orchestrator.path_registry import PathRegistry
-from staleness.service.section_alignment import (
-    _parse_alignment_verdict,
-    _run_alignment_check_with_retries,
-    collect_modified_files,
-)
-from signals.service.communication import _log_artifact, log
 from orchestrator.types import Section
-from taskrouter import agent_for
 
 
 def run_impact_triage(
@@ -90,7 +82,7 @@ Valid actions: "accepted" (resolved/no-op), "rejected" (disagree with note),
 """
     if not Services.prompt_guard().write_validated(triage_prompt_text, triage_prompt_path):
         return ("continue", None)
-    _log_artifact(planspace, f"prompt:triage-{section.number}")
+    Services.communicator().log_artifact(planspace, f"prompt:triage-{section.number}")
 
     Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"triage"),
@@ -100,10 +92,10 @@ Valid actions: "accepted" (resolved/no-op), "rejected" (disagree with note),
         parent,
         codespace=codespace,
         section_number=section.number,
-        agent_file=agent_for("coordination.consequence_triage"),
+        agent_file=Services.task_router().agent_for("coordination.consequence_triage"),
     )
 
-    triage = read_json(triage_signal_path)
+    triage = Services.artifact_io().read_json(triage_signal_path)
     if triage is None:
         return ("continue", None)
 
@@ -114,7 +106,7 @@ Valid actions: "accepted" (resolved/no-op), "rejected" (disagree with note),
 
     triage_acks = triage.get("acknowledge", [])
     ack_path = paths.note_ack_signal(section.number)
-    existing_acks: dict = read_json_or_default(ack_path, {"acknowledged": []})
+    existing_acks: dict = Services.artifact_io().read_json_or_default(ack_path, {"acknowledged": []})
     existing_ids = {
         entry.get("note_id")
         for entry in existing_acks.get("acknowledged", [])
@@ -124,24 +116,24 @@ Valid actions: "accepted" (resolved/no-op), "rejected" (disagree with note),
         if note_id and note_id not in existing_ids:
             existing_acks.setdefault("acknowledged", []).append(ack)
             existing_ids.add(note_id)
-    write_json(ack_path, existing_acks)
+    Services.artifact_io().write_json(ack_path, existing_acks)
 
     incoming_note_ids = set(
         re.findall(r"\*\*Note ID\*\*:\s*`([^`]+)`", incoming_notes),
     )
     acked_ids = {ack.get("note_id") for ack in triage_acks} | existing_ids
     if incoming_note_ids and not incoming_note_ids.issubset(acked_ids):
-        log(
+        Services.logger().log(
             f"Section {section.number}: triage did not acknowledge all notes "
             "— full processing",
         )
         return ("continue", None)
 
-    log(
+    Services.logger().log(
         f"Section {section.number}: triage says no rework needed — "
         "skipping to alignment check",
     )
-    verify_result = _run_alignment_check_with_retries(
+    verify_result = Services.section_alignment().run_alignment_check(
         section,
         planspace,
         codespace,
@@ -154,17 +146,17 @@ Valid actions: "accepted" (resolved/no-op), "rejected" (disagree with note),
     if verify_result == "ALIGNMENT_CHANGED_PENDING":
         return ("abort", None)
     if verify_result:
-        verdict = _parse_alignment_verdict(verify_result)
+        verdict = Services.section_alignment().parse_alignment_verdict(verify_result)
         if (
             verdict is not None
             and verdict.get("aligned") is True
             and verdict.get("frame_ok", True) is True
         ):
-            log(
+            Services.logger().log(
                 f"Section {section.number}: triage + alignment confirms no "
                 "rework needed",
             )
-            reported = collect_modified_files(planspace, section, codespace)
+            reported = Services.section_alignment().collect_modified_files(planspace, section, codespace)
             return ("skip", reported if reported else [])
 
     return ("continue", None)

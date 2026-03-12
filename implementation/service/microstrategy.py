@@ -3,15 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
-from dispatch.prompt.template import TASK_SUBMISSION_SEMANTICS
-from signals.service.communication import _log_artifact, _record_traceability, log, mailbox_send
-from orchestrator.service.pipeline_control import poll_control_messages
+from pipeline.template import TASK_SUBMISSION_SEMANTICS
 from dispatch.prompt.writers import agent_mail_instructions
-from flow.service.section_ingestion import ingest_and_submit
 from implementation.service.microstrategy_decision import _check_needs_microstrategy
-from taskrouter import agent_for
 
 
 def run_microstrategy(
@@ -40,7 +35,7 @@ def run_microstrategy(
         and not microstrategy_path.exists()
     )
     if not needs_microstrategy and not microstrategy_path.exists():
-        log(
+        Services.logger().log(
             f"Section {section.number}: microstrategy decider did not "
             f"request microstrategy — skipping"
         )
@@ -49,7 +44,7 @@ def run_microstrategy(
     if not needs_microstrategy:
         return microstrategy_path if microstrategy_path.exists() else None
 
-    log(f"Section {section.number}: generating microstrategy")
+    Services.logger().log(f"Section {section.number}: generating microstrategy")
     micro_prompt_path = artifacts / f"microstrategy-{section.number}-prompt.md"
     micro_output_path = artifacts / f"microstrategy-{section.number}-output.md"
     agent_name = f"microstrategy-{section.number}"
@@ -107,15 +102,15 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
 """
     violations = Services.prompt_guard().validate_dynamic(rendered)
     if violations:
-        log(
+        Services.logger().log(
             f"  ERROR: prompt {micro_prompt_path.name} blocked — "
             f"template violations: {violations}"
         )
         return None
     micro_prompt_path.write_text(rendered, encoding="utf-8")
-    _log_artifact(planspace, f"prompt:microstrategy-{section.number}")
+    Services.communicator().log_artifact(planspace, f"prompt:microstrategy-{section.number}")
 
-    ctrl = poll_control_messages(planspace, parent, current_section=section.number)
+    ctrl = Services.pipeline_control().poll_control_messages(planspace, parent, current_section=section.number)
     if ctrl == "alignment_changed":
         return None
     micro_result = Services.dispatcher().dispatch(
@@ -127,12 +122,12 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
         agent_name,
         codespace=codespace,
         section_number=section.number,
-        agent_file=agent_for("implementation.microstrategy"),
+        agent_file=Services.task_router().agent_for("implementation.microstrategy"),
     )
     if micro_result == "ALIGNMENT_CHANGED_PENDING":
         return None
 
-    ingest_and_submit(
+    Services.flow_ingestion().ingest_and_submit(
         planspace,
         db_path=planspace / "run.db",
         submitted_by=f"microstrategy-{section.number}",
@@ -141,7 +136,7 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
     )
 
     if not microstrategy_path.exists() or microstrategy_path.stat().st_size == 0:
-        log(
+        Services.logger().log(
             f"Section {section.number}: microstrategy missing after "
             f"dispatch — retrying with escalation model"
         )
@@ -155,28 +150,28 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
             f"{agent_name}-escalation",
             codespace=codespace,
             section_number=section.number,
-            agent_file=agent_for("implementation.microstrategy"),
+            agent_file=Services.task_router().agent_for("implementation.microstrategy"),
         )
         if escalated_result == "ALIGNMENT_CHANGED_PENDING":
             return None
 
     if microstrategy_path.exists() and microstrategy_path.stat().st_size > 0:
-        log(f"Section {section.number}: microstrategy generated")
-        _record_traceability(
+        Services.logger().log(f"Section {section.number}: microstrategy generated")
+        Services.communicator().record_traceability(
             planspace,
             section.number,
             f"section-{section.number}-microstrategy.md",
             f"section-{section.number}-integration-proposal.md",
             "tactical breakdown from integration proposal",
         )
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"summary:microstrategy:{section.number}:generated",
         )
         return microstrategy_path
 
-    log(
+    Services.logger().log(
         f"Section {section.number}: microstrategy generation "
         f"failed — emitting blocker signal"
     )
@@ -186,16 +181,16 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
         "detail": "Microstrategy generation failed after primary + escalation attempts",
         "needs": "Tactical breakdown from upstream or decision to proceed without microstrategy",
     }
-    write_json(
+    Services.artifact_io().write_json(
         paths.microstrategy_blocker_signal(section.number),
         blocker,
     )
-    _record_traceability(
+    Services.communicator().record_traceability(
         planspace,
         section.number,
         f"microstrategy-blocker-{section.number}.json",
         f"section-{section.number}-integration-proposal.md",
         "microstrategy generation failed — blocker emitted",
     )
-    mailbox_send(planspace, parent, f"summary:microstrategy:{section.number}:blocked")
+    Services.communicator().mailbox_send(planspace, parent, f"summary:microstrategy:{section.number}:blocked")
     return None

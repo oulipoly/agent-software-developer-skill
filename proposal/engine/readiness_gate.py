@@ -3,20 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from signals.repository.artifact_io import write_json
-from staleness.helpers.hashing import content_hash
 from orchestrator.path_registry import PathRegistry
 from research.engine.orchestrator import (
     compute_trigger_hash,
     is_research_complete_for_trigger,
     write_research_status,
 )
-from research.prompt.writer import write_research_plan_prompt
+from research.prompt.writers import write_research_plan_prompt
 from proposal.repository.state import load_proposal_state
-from staleness.service.freshness import compute_section_freshness
 from proposal.service.readiness_resolver import resolve_readiness
 from reconciliation.repository.queue import queue_reconciliation_request
-from signals.service.communication import mailbox_send, log
+from containers import Services
 from signals.service.blockers import (
     _append_open_problem,
     _update_blocker_rollup,
@@ -55,8 +52,8 @@ def _emit_needs_parent_research_signals(
             signal_dir
             / f"section-{section_number}-blocking-research-{i}-signal.json"
         )
-        write_json(sig_path, research_signal)
-        log(
+        Services.artifact_io().write_json(sig_path, research_signal)
+        Services.logger().log(
             f"Section {section_number}: {detail_log} "
             f"for blocking_research_question[{i}]"
         )
@@ -74,7 +71,7 @@ def publish_discoveries(
     for candidate in proposal_state.get("new_section_candidates", []):
         scope_delta_dir.mkdir(parents=True, exist_ok=True)
         cand_text = str(candidate)
-        cand_hash = content_hash(cand_text)[:8]
+        cand_hash = Services.hasher().content_hash(cand_text)[:8]
         delta_id = f"delta-{section_number}-candidate-{cand_hash}"
         scope_delta = {
             "delta_id": delta_id,
@@ -88,8 +85,8 @@ def publish_discoveries(
             scope_delta_dir
             / f"section-{section_number}-candidate-{cand_hash}-scope-delta.json"
         )
-        write_json(delta_path, scope_delta)
-        log(
+        Services.artifact_io().write_json(delta_path, scope_delta)
+        Services.logger().log(
             f"Section {section_number}: wrote scope-delta for "
             f"new_section_candidate ({cand_hash})"
         )
@@ -111,8 +108,8 @@ def publish_discoveries(
             "source": "proposal-state",
         }
         rq_path = open_problems_dir / f"section-{section_number}-research-questions.json"
-        write_json(rq_path, rq_artifact)
-        log(
+        Services.artifact_io().write_json(rq_path, rq_artifact)
+        Services.logger().log(
             f"Section {section_number}: wrote {len(rq_list)} "
             f"research questions to open-problems artifact"
         )
@@ -144,8 +141,8 @@ def route_blockers(
             "source": "proposal-state:user_root_questions",
         }
         sig_path = signal_dir / f"section-{section_number}-proposal-q{i}-signal.json"
-        write_json(sig_path, q_signal)
-        log(
+        Services.artifact_io().write_json(sig_path, q_signal)
+        Services.logger().log(
             f"Section {section_number}: emitted NEED_DECISION "
             f"signal for user_root_question[{i}]"
         )
@@ -186,7 +183,7 @@ def route_blockers(
                 "trigger_hash": trigger_hash,
                 "cycle_id": cycle_id,
             }
-            write_json(trigger_path, trigger)
+            Services.artifact_io().write_json(trigger_path, trigger)
             prompt_path = write_research_plan_prompt(
                 section_number,
                 planspace,
@@ -204,7 +201,7 @@ def route_blockers(
                     trigger_hash=trigger_hash,
                     cycle_id=cycle_id,
                 )
-                freshness = compute_section_freshness(planspace, section_number)
+                freshness = Services.freshness().compute(planspace, section_number)
                 task_id = submit_task(
                     registry.run_db(),
                     f"readiness-{section_number}",
@@ -214,7 +211,7 @@ def route_blockers(
                     problem_id=f"research-{section_number}",
                     freshness_token=freshness,
                 )
-                log(
+                Services.logger().log(
                     f"Section {section_number}: dispatched research_plan "
                     f"task {task_id} with prompt and freshness token"
                 )
@@ -252,8 +249,8 @@ def route_blockers(
             "trigger_type": "shared_seam",
         }
         trigger_path = signal_dir / f"substrate-trigger-{section_number}-{i:02d}.json"
-        write_json(trigger_path, trigger)
-        log(
+        Services.artifact_io().write_json(trigger_path, trigger)
+        Services.logger().log(
             f"Section {section_number}: wrote substrate-trigger "
             f"for shared_seam_candidate[{i}]"
         )
@@ -274,7 +271,7 @@ def route_blockers(
             "source": "proposal-state:shared_seam_candidates",
         }
         sig_path = signal_dir / f"section-{section_number}-seam-{i}-signal.json"
-        write_json(sig_path, seam_signal)
+        Services.artifact_io().write_json(sig_path, seam_signal)
 
     unresolved_contracts = [
         str(contract) for contract in proposal_state.get("unresolved_contracts", [])
@@ -289,7 +286,7 @@ def route_blockers(
             unresolved_contracts,
             unresolved_anchors,
         )
-        log(
+        Services.logger().log(
             f"Section {section_number}: queued reconciliation "
             f"request ({len(unresolved_contracts)} contracts, "
             f"{len(unresolved_anchors)} anchors)"
@@ -316,7 +313,7 @@ def resolve_and_route(
     if not readiness.get("ready"):
         blockers = readiness.get("blockers", [])
         rationale = readiness.get("rationale", "unknown")
-        log(
+        Services.logger().log(
             f"Section {section.number}: execution blocked — "
             f"readiness=false, rationale={rationale}, blockers={len(blockers)}"
         )
@@ -325,8 +322,8 @@ def resolve_and_route(
             # governance (state/detail) blocker shapes for logging
             btype = blocker.get("type") or blocker.get("state", "unknown")
             bdesc = blocker.get("description") or blocker.get("detail", "")
-            log(f"  blocker: {btype}: {bdesc}")
-        mailbox_send(
+            Services.logger().log(f"  blocker: {btype}: {bdesc}")
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"fail:{section.number}:readiness gate blocked ({rationale})",
@@ -362,7 +359,7 @@ def resolve_and_route(
 
     proposal_pass_result = None
     if pass_mode == "proposal":
-        log(
+        Services.logger().log(
             f"Section {section.number}: proposal pass complete — "
             f"execution_ready=true, deferring implementation"
         )

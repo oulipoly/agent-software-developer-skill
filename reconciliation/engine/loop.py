@@ -7,14 +7,13 @@ candidates, and shared seam candidates.  Writes per-section
 reconciliation-result artifacts and, when needed, consolidated
 scope-delta and substrate-trigger artifacts.
 
-Entry point: ``run_reconciliation(run_dir, proposal_results)``.
+Entry point: ``run_reconciliation_loop(run_dir, proposal_results)``.
 """
 
 import logging
 from pathlib import Path
 
-from signals.repository.artifact_io import write_json
-from orchestrator.path_registry import PathRegistry
+from containers import Services
 from proposal.repository.state import load_proposal_state
 from reconciliation.service.adjudicator import adjudicate_ungrouped_candidates
 from reconciliation.service.detectors import (
@@ -78,7 +77,7 @@ def was_section_affected(run_dir: Path, section_number: str) -> bool:
     return repository_was_section_affected(run_dir, section_number)
 
 
-def run_reconciliation(
+def run_reconciliation_loop(
     run_dir: Path,
     proposal_results: list,
 ) -> dict:
@@ -286,6 +285,6 @@ def run_reconciliation(
         run_dir / "artifacts" / "reconciliation"
         / "reconciliation-summary.json"
     )
-    write_json(summary_path, summary)
+    Services.artifact_io().write_json(summary_path, summary)
 
     return summary

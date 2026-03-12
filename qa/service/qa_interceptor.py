@@ -22,12 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from containers import Services
-from signals.repository.artifact_io import read_json, rename_malformed, write_json
 from orchestrator.path_registry import PathRegistry
-from qa.helpers.qa_verdict import QaVerdict, parse_qa_verdict
+from qa.helpers.qa_verdict import parse_qa_verdict
 
-from taskrouter.agents import resolve_agent_path
-from taskrouter import agent_for
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +76,7 @@ def read_qa_parameters(planspace: Path) -> dict:
     if not params_path.exists():
         return defaults
 
-    data = read_json(params_path)
+    data = Services.artifact_io().read_json(params_path)
     if data is None:
         print(
             f"[qa-interceptor] WARNING: Malformed parameters.json at "
@@ -94,7 +91,7 @@ def read_qa_parameters(planspace: Path) -> dict:
             f"object — renaming to .malformed.json",
             flush=True,
         )
-        rename_malformed(params_path)
+        Services.artifact_io().rename_malformed(params_path)
         return defaults
 
     # Merge with defaults so qa_mode always exists.
@@ -109,7 +106,7 @@ def _resolve_submitter_contract(submitter: str) -> str:
     """
     # Try direct agent file lookup.
     try:
-        agent_path = resolve_agent_path(f"{submitter}.md")
+        agent_path = Services.task_router().resolve_agent_path(f"{submitter}.md")
         return agent_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         pass
@@ -138,7 +135,7 @@ def _build_qa_prompt(
     Uses ``render_template`` from ``agent_templates`` to wrap with
     system constraints.
     """
-    from dispatch.prompt.template import render_template
+    from pipeline.template import render_template
 
     task_id = task.get("id", "?")
     task_type = task.get("type", "?")
@@ -220,7 +217,7 @@ def _write_rationale(
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    write_json(rationale_path, rationale_data)
+    Services.artifact_io().write_json(rationale_path, rationale_data)
     return rationale_path
 
 
@@ -273,7 +270,7 @@ def intercept_task(
     try:
         # 1. Read target agent contract.
         try:
-            target_path = resolve_agent_path(agent_file)
+            target_path = Services.task_router().resolve_agent_path(agent_file)
         except FileNotFoundError:
             target_path = None
         if target_path is None:
@@ -334,7 +331,7 @@ def intercept_task(
             output_path,
             planspace,
             None,  # parent — not inside section-loop context
-            agent_file=agent_for("qa.qa_intercept"),
+            agent_file=Services.task_router().agent_for("qa.qa_intercept"),
         )
 
         # 7. Parse verdict.

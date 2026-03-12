@@ -8,13 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from staleness.service.change_tracker import check_pending as alignment_changed_pending
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import log, mailbox_send
-from coordination.service.cross_section import persist_decision
+from containers import Services
 from intent.service.expansion import handle_user_gate, run_expansion_cycle
-from orchestrator.service.pipeline_control import pause_for_parent
 
 
 def run_aligned_expansion(
@@ -39,7 +35,7 @@ def run_aligned_expansion(
     expansion_count = expansion_counts.get(section_number, 0)
 
     if expansion_count >= expansion_max:
-        log(
+        Services.logger().log(
             f"Section {section_number}: intent expansion "
             f"budget exhausted ({expansion_count}/{expansion_max}) "
             f"— pausing for decision"
@@ -49,11 +45,11 @@ def run_aligned_expansion(
             "reason": "expansion budget exhausted",
             "cycles": expansion_count,
         }
-        write_json(
+        Services.artifact_io().write_json(
             paths.intent_stalled_signal(section_number),
             stalled_signal,
         )
-        response = pause_for_parent(
+        response = Services.pipeline_control().pause_for_parent(
             planspace,
             parent,
             f"pause:intent-stalled:{section_number}:"
@@ -63,11 +59,11 @@ def run_aligned_expansion(
             return None
         return "break"
 
-    log(
+    Services.logger().log(
         f"Section {section_number}: surfaces found — "
         f"running expansion cycle"
     )
-    mailbox_send(
+    Services.communicator().mailbox_send(
         planspace,
         parent,
         f"summary:intent-expand:{section_number}:cycle-{expansion_count + 1}",
@@ -93,12 +89,12 @@ def run_aligned_expansion(
         if gate_response:
             payload = gate_response.partition(":")[2].strip()
             if payload:
-                persist_decision(planspace, section_number, payload)
-        if alignment_changed_pending(planspace):
+                Services.cross_section().persist_decision(planspace, section_number, payload)
+        if Services.pipeline_control().alignment_changed_pending(planspace):
             return None
 
     if delta_result.get("restart_required"):
-        log(
+        Services.logger().log(
             f"Section {section_number}: intent "
             f"expanded — re-proposing"
         )
@@ -125,14 +121,14 @@ def run_misaligned_expansion(
     expansion_count = expansion_counts.get(section_number, 0)
 
     if expansion_count >= expansion_max:
-        log(
+        Services.logger().log(
             f"Section {section_number}: definition-gap surfaces "
             f"found on misaligned pass but expansion budget is "
             f"exhausted ({expansion_count}/{expansion_max})"
         )
         return
 
-    log(
+    Services.logger().log(
         f"Section {section_number}: definition-gap surfaces "
         f"found on misaligned pass — running expansion"
     )
@@ -157,4 +153,4 @@ def run_misaligned_expansion(
         if gate_response:
             payload = gate_response.partition(":")[2].strip()
             if payload:
-                persist_decision(planspace, section_number, payload)
+                Services.cross_section().persist_decision(planspace, section_number, payload)

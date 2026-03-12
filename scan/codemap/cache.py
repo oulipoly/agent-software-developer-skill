@@ -10,8 +10,7 @@ import re
 import shutil
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json
-from staleness.helpers.hashing import content_hash
+from containers import Services
 
 # Regex to strip scan-generated summary blocks from section text.
 # These blocks are wrapped in HTML comment markers by update_match().
@@ -79,7 +78,7 @@ class FileCardCache:
                 parts.append(p.read_bytes())
             except OSError:
                 pass
-        return content_hash(b"".join(parts))
+        return Services.hasher().content_hash(b"".join(parts))
 
     # ------------------------------------------------------------------
     # Lookup
@@ -127,7 +126,7 @@ def is_valid_cached_feedback(feedback_path: Path) -> bool:
     """
     if not feedback_path.is_file():
         return False
-    data = read_json(feedback_path)
+    data = Services.artifact_io().read_json(feedback_path)
     if data is None:
         print(
             f"[CACHE][WARN] Malformed cached feedback: "

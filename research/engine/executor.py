@@ -10,12 +10,10 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from flow.types.schema import BranchSpec, GateSpec, TaskSpec
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
-from flow.engine.submitter import new_flow_id, submit_chain, submit_fanout
-from staleness.service.freshness import compute_section_freshness
+from flow.engine.submitter import new_flow_id, submit_fanout
 from research.engine.orchestrator import load_research_status, validate_research_plan, write_research_status
-from research.prompt.writer import (
+from research.prompt.writers import (
     write_research_synthesis_prompt,
     write_research_ticket_prompt,
     write_research_verify_prompt,
@@ -133,7 +131,7 @@ def _emit_not_researchable_signals(
             "why_blocked": reason or "Planner marked this question as not researchable",
             "source": "research-plan:not_researchable",
         }
-        write_json(
+        Services.artifact_io().write_json(
             signals_dir / f"section-{section_number}-research-blocker-{index}.json",
             signal,
         )
@@ -425,7 +423,7 @@ def _submit_fanout(
 
     # Compute freshness AFTER all writes (prompts, specs, status) so
     # the token matches what the dispatcher will see.
-    post_write_freshness = compute_section_freshness(planspace, section_number)
+    post_write_freshness = Services.freshness().compute(planspace, section_number)
 
     flow_id = new_flow_id()
     gate = GateSpec(
@@ -474,7 +472,7 @@ def submit_research_verify(
         )
         return False
 
-    submit_chain(
+    Services.flow_ingestion().submit_chain(
         db_path,
         f"research-{section_number}",
         [

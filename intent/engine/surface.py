@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import write_json
 from orchestrator.path_registry import PathRegistry
 from containers import Services
-from signals.service.communication import log
 from intent.service.surfaces import (
     find_discarded_recurrences,
     load_combined_intent_surfaces,
@@ -23,7 +21,6 @@ from intent.service.expanders import (
     run_philosophy_expander,
     run_problem_expander,
 )
-from orchestrator.service.pipeline_control import pause_for_parent
 
 
 def build_pending_surface_payload(worklist: list[dict], surfaces: dict) -> dict:
@@ -105,7 +102,7 @@ def run_expansion_cycle(
     )
 
     surfaces_path = paths.intent_surfaces_signal(section_number)
-    write_json(surfaces_path, surfaces)
+    Services.artifact_io().write_json(surfaces_path, surfaces)
 
     if not new_surfaces:
         recurrences = find_discarded_recurrences(registry, duplicate_ids)
@@ -135,7 +132,7 @@ def run_expansion_cycle(
 
     max_surfaces = budget_config.get("max_new_surfaces_per_cycle", 8)
     if len(worklist) > max_surfaces:
-        log(f"Section {section_number}: {len(worklist)} pending surfaces "
+        Services.logger().log(f"Section {section_number}: {len(worklist)} pending surfaces "
             f"exceeds budget of {max_surfaces} — processing oldest "
             f"{max_surfaces}")
         worklist = worklist[:max_surfaces]
@@ -144,7 +141,7 @@ def run_expansion_cycle(
     pending_surfaces_path = (
         paths.signals_dir() / f"intent-surfaces-pending-{section_number}.json"
     )
-    write_json(pending_surfaces_path, budgeted_surfaces)
+    Services.artifact_io().write_json(pending_surfaces_path, budgeted_surfaces)
 
     axes_added = registry.get("axes_added_so_far", 0)
     max_axes = budget_config.get("max_new_axes_total", 6)
@@ -177,7 +174,7 @@ def run_expansion_cycle(
         if problem_delta:
             proposed_axes = problem_delta.get("new_axes", [])
             if len(proposed_axes) > remaining_axis_budget:
-                log(f"Section {section_number}: expander proposed "
+                Services.logger().log(f"Section {section_number}: expander proposed "
                     f"{len(proposed_axes)} new axes (budget advisory: "
                     f"{remaining_axis_budget}) — accepting all")
             delta["applied"]["problem_definition_updated"] = (
@@ -236,7 +233,7 @@ def run_expansion_cycle(
     save_surface_registry(section_number, planspace, registry)
 
     delta_path = paths.intent_delta_signal(section_number)
-    write_json(delta_path, delta)
+    Services.artifact_io().write_json(delta_path, delta)
 
     expansion_applied = (
         delta["applied"]["problem_definition_updated"]
@@ -303,14 +300,14 @@ def handle_user_gate(
         signals_dir / f"intent-expand-{section_number}-signal.json"
     )
     if not blocker_path.exists():
-        write_json(blocker_path, {
+        Services.artifact_io().write_json(blocker_path, {
             "state": "NEED_DECISION",
             "detail": message["detail"],
             "needs": message["needs"],
             "why_blocked": message["why_blocked"],
         })
 
-    return pause_for_parent(
+    return Services.pipeline_control().pause_for_parent(
         planspace,
         parent,
         f"pause:need_decision:{section_number}:{message['pause_summary']}",

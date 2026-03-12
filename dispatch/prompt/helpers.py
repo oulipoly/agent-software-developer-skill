@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import DB_SH
-from dispatch.prompt.template import load_template, render
+from _config import DB_SH
+from pipeline.template import load_template, render
 
 
 def signal_instructions(signal_path: Path) -> str:

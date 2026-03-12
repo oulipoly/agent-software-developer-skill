@@ -7,17 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from signals.repository.artifact_io import read_json, write_json
-from staleness.helpers.hashing import content_hash
 from containers import Services
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import log, mailbox_send
 from coordination.prompt.writers import write_bridge_prompt, write_fix_prompt
-from dispatch.helpers.utils import write_model_choice_signal
 from flow.service.section_ingestion import ingest_and_submit
-from orchestrator.service.pipeline_control import poll_control_messages
 from orchestrator.types import Section
-from taskrouter import agent_for
 
 
 class CoordinationExecutionExit(Exception):
@@ -55,7 +49,7 @@ def _build_execution_batches(
                         break
                 if not placed:
                     batches.append([group_index])
-        log(
+        Services.logger().log(
             f"  coordinator: using agent-specified batch ordering "
             f"({len(agent_batches)} agent batches → "
             f"{len(batches)} execution batches with file-safety)",
@@ -108,7 +102,7 @@ def _write_overlap_stats(
     if overlap_count <= 0:
         return
 
-    log(
+    Services.logger().log(
         f"  coordinator: group {group_index} has "
         f"{overlap_count} overlapping files across "
         f"sections — bridge decision deferred to "
@@ -145,7 +139,7 @@ def _inject_bridge_note_ids(
         note_text = note_path.read_text(encoding="utf-8")
         if "**Note ID**:" in note_text:
             continue
-        fingerprint = content_hash(delta_bytes + section_num.encode("utf-8"))[:12]
+        fingerprint = Services.hasher().content_hash(delta_bytes + section_num.encode("utf-8"))[:12]
         note_path.write_text(
             f"**Note ID**: `bridge-{group_index}-to-{section_num}-{fingerprint}`\n\n"
             f"{note_text}",
@@ -177,7 +171,7 @@ def _run_bridge_for_group(
     if bridge_prompt is None:
         return
 
-    log(
+    Services.logger().log(
         f"  coordinator: dispatching bridge agent for group "
         f"{group_index} ({group_sections}) — reason: {bridge_reason}",
     )
@@ -190,12 +184,12 @@ def _run_bridge_for_group(
         planspace,
         parent,
         codespace=codespace,
-        agent_file=agent_for("coordination.bridge"),
+        agent_file=Services.task_router().agent_for("coordination.bridge"),
     )
 
     paths.contracts_dir().mkdir(parents=True, exist_ok=True)
     if not contract_delta_path.exists():
-        log(
+        Services.logger().log(
             f"  coordinator: bridge didn't write contract "
             f"delta — retrying (group {group_index})",
         )
@@ -206,10 +200,10 @@ def _run_bridge_for_group(
             planspace,
             parent,
             codespace=codespace,
-            agent_file=agent_for("coordination.bridge"),
+            agent_file=Services.task_router().agent_for("coordination.bridge"),
         )
     if not contract_delta_path.exists():
-        log(
+        Services.logger().log(
             f"  coordinator: bridge failed to write contract "
             f"delta after retry — pausing for parent "
             f"(group {group_index})",
@@ -226,7 +220,7 @@ def _run_bridge_for_group(
         blocker_path = paths.signals_dir() / f"blocker-bridge-{group_index}.json"
         blocker_path.parent.mkdir(parents=True, exist_ok=True)
         blocker_path.write_text(json.dumps(blocker_signal, indent=2), encoding="utf-8")
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             f"pause:needs_parent:bridge-{group_index}:contract delta missing after retry",
             "coordinator",
@@ -241,7 +235,7 @@ def _run_bridge_for_group(
             str(contract_delta_path),
             encoding="utf-8",
         )
-    log(
+    Services.logger().log(
         f"  coordinator: bridge complete for group {group_index}, "
         f"contract delta at {contract_delta_path}",
     )
@@ -262,7 +256,7 @@ def _dispatch_fix_group(
     policy = Services.policies().load(planspace)
     fix_prompt = write_fix_prompt(group, planspace, codespace, group_id)
     if fix_prompt is None:
-        log(f"  coordinator: fix group {group_id} prompt blocked "
+        Services.logger().log(f"  coordinator: fix group {group_id} prompt blocked "
             f"by template safety — skipping dispatch")
         return group_id, None
     fix_output = coord_dir / f"fix-{group_id}-output.md"
@@ -276,9 +270,9 @@ def _dispatch_fix_group(
     if escalation_file.exists():
         coord_escalated_from = fix_model
         fix_model = escalation_file.read_text(encoding="utf-8").strip()
-        log(f"  coordinator: using escalated model {fix_model}")
+        Services.logger().log(f"  coordinator: using escalated model {fix_model}")
 
-    write_model_choice_signal(
+    Services.dispatch_helpers().write_model_choice_signal(
         planspace, f"coord-{group_id}", "coordination-fix",
         fix_model,
         "escalated due to coordination churn" if coord_escalated_from
@@ -286,12 +280,12 @@ def _dispatch_fix_group(
         coord_escalated_from,
     )
 
-    log(f"  coordinator: dispatching fix for group {group_id} "
+    Services.logger().log(f"  coordinator: dispatching fix for group {group_id} "
         f"({len(group)} problems)")
     result = Services.dispatcher().dispatch(
         fix_model, fix_prompt, fix_output,
         planspace, parent, codespace=codespace,
-        agent_file=agent_for("coordination.fix"),
+        agent_file=Services.task_router().agent_for("coordination.fix"),
     )
     if result == "ALIGNMENT_CHANGED_PENDING":
         return group_id, None
@@ -322,7 +316,7 @@ def _collect_modified_files(modified_report: Path, codespace: Path) -> list[str]
             try:
                 rel = pp.resolve().relative_to(codespace_resolved)
             except ValueError:
-                log(f"  coordinator: WARNING — fix path outside "
+                Services.logger().log(f"  coordinator: WARNING — fix path outside "
                     f"codespace, skipping: {line}")
                 continue
         else:
@@ -330,7 +324,7 @@ def _collect_modified_files(modified_report: Path, codespace: Path) -> list[str]
             try:
                 rel = full.relative_to(codespace_resolved)
             except ValueError:
-                log(f"  coordinator: WARNING — fix path escapes "
+                Services.logger().log(f"  coordinator: WARNING — fix path escapes "
                     f"codespace, skipping: {line}")
                 continue
         modified.append(str(rel))
@@ -338,7 +332,7 @@ def _collect_modified_files(modified_report: Path, codespace: Path) -> list[str]
 
 
 def _persist_modified_files(planspace: Path, modified_files: list[str]) -> None:
-    write_json(
+    Services.artifact_io().write_json(
         PathRegistry(planspace).coordination_dir() / "execution-modified-files.json",
         {"files": modified_files},
     )
@@ -346,7 +340,7 @@ def _persist_modified_files(planspace: Path, modified_files: list[str]) -> None:
 
 def read_execution_modified_files(planspace: Path) -> list[str]:
     """Read the persisted list of files modified during coordination."""
-    data = read_json(
+    data = Services.artifact_io().read_json(
         PathRegistry(planspace).coordination_dir() / "execution-modified-files.json",
     )
     if not isinstance(data, dict):
@@ -367,7 +361,7 @@ def execute_coordination_plan(
     coord_plan = plan["coord_plan"]
     confirmed_groups = plan["confirmed_groups"]
     batches = _build_execution_batches(coord_plan, confirmed_groups)
-    log(f"  coordinator: {len(batches)} execution batches")
+    Services.logger().log(f"  coordinator: {len(batches)} execution batches")
 
     affected_sections: set[str] = {
         problem["section"]
@@ -379,7 +373,7 @@ def execute_coordination_plan(
     coord_dir.mkdir(parents=True, exist_ok=True)
 
     for batch_num, batch in enumerate(batches):
-        ctrl = poll_control_messages(planspace, parent)
+        ctrl = Services.pipeline_control().poll_control_messages(planspace, parent)
         if ctrl == "alignment_changed":
             raise CoordinationExecutionExit
 
@@ -422,7 +416,7 @@ def execute_coordination_plan(
             all_modified.extend(modified)
             continue
 
-        log(f"  coordinator: batch {batch_num} — {len(batch)} groups in parallel")
+        Services.logger().log(f"  coordinator: batch {batch_num} — {len(batch)} groups in parallel")
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {
                 pool.submit(
@@ -445,16 +439,16 @@ def execute_coordination_plan(
                         sentinel_hit = True
                         continue
                     all_modified.extend(modified)
-                    log(
+                    Services.logger().log(
                         f"  coordinator: group {group_index} fix "
                         f"complete ({len(modified)} files modified)",
                     )
                 except Exception as exc:
-                    log(f"  coordinator: group {group_index} fix FAILED: {exc}")
+                    Services.logger().log(f"  coordinator: group {group_index} fix FAILED: {exc}")
             if sentinel_hit:
                 raise CoordinationExecutionExit
 
-    log(f"  coordinator: fixes complete, {len(all_modified)} total files modified")
+    Services.logger().log(f"  coordinator: fixes complete, {len(all_modified)} total files modified")
 
     file_to_sections: dict[str, set[str]] = {}
     for section_num, section in sections_by_num.items():

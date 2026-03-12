@@ -9,21 +9,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, write_json
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import _record_traceability, log
 from intent.service.loop_bootstrap import (
     ensure_global_philosophy,
     generate_intent_pack,
 )
 from intent.service.triage import run_intent_triage
-from orchestrator.service.pipeline_control import pause_for_parent
+from containers import Services
 from signals.service.blockers import _update_blocker_rollup
 from intake.service.packet import build_section_governance_packet
 from orchestrator.types import Section
-from staleness.service.change_tracker import check_pending as alignment_changed_pending
 
 from pipeline import AlignmentGuard, Pipeline, PipelineContext, Step
+
+
+# Module-level callback — monkey-patched by runner before use; default
+# routes through the DI container so standalone calls also work.
+alignment_changed_pending = lambda planspace: Services.pipeline_control().alignment_changed_pending(planspace)
 
 
 # -- Step functions (each has exactly ONE concern) -------------------------
@@ -75,25 +77,25 @@ def _step_extract_todos(ctx: PipelineContext) -> str:
 
     if todo_entries:
         todos_path.write_text(todo_entries, encoding="utf-8")
-        log(f"Section {ctx.section.number}: extracted TODOs from related files")
-        _record_traceability(
+        Services.logger().log(f"Section {ctx.section.number}: extracted TODOs from related files")
+        Services.communicator().record_traceability(
             ctx.planspace, ctx.section.number, artifact_name,
             "related files TODO extraction",
             "in-code microstrategies for alignment",
         )
     elif todos_path.exists():
         todos_path.unlink()
-        log(
+        Services.logger().log(
             f"Section {ctx.section.number}: removed stale TODO extraction "
             "(no TODOs remaining)",
         )
-        _record_traceability(
+        Services.communicator().record_traceability(
             ctx.planspace, ctx.section.number, artifact_name,
             "related files TODO extraction",
             "in-code microstrategies for alignment",
         )
     else:
-        log(f"Section {ctx.section.number}: no TODOs found in related files")
+        Services.logger().log(f"Section {ctx.section.number}: no TODOs found in related files")
 
     return todo_entries or ""
 
@@ -113,22 +115,22 @@ def _step_philosophy(ctx: PipelineContext) -> dict:
         blocking_state = result.get("blocking_state")
         sec = ctx.section.number
         if blocking_state == "NEED_DECISION":
-            log(
+            Services.logger().log(
                 f"Section {sec}: philosophy bootstrap needs "
                 f"user input — {result['detail']}",
             )
             _update_blocker_rollup(ctx.planspace)
-            pause_for_parent(
+            Services.pipeline_control().pause_for_parent(
                 ctx.planspace, ctx.parent,
                 "pause:need_decision:global:philosophy bootstrap requires user input",
             )
         elif blocking_state == "NEEDS_PARENT":
-            log(
+            Services.logger().log(
                 f"Section {sec}: philosophy bootstrap needs "
                 f"parent intervention — {result['detail']}",
             )
         else:
-            log(
+            Services.logger().log(
                 f"Section {sec}: philosophy unavailable — "
                 f"{result['detail']}",
             )
@@ -158,7 +160,7 @@ def _step_intent_pack(ctx: PipelineContext) -> str:
         ctx.parent,
         incoming_notes=ctx.state.get("incoming_notes", ""),
     )
-    log(f"Section {ctx.section.number}: intent bootstrap complete (full mode)")
+    Services.logger().log(f"Section {ctx.section.number}: intent bootstrap complete (full mode)")
     return "ok"
 
 
@@ -170,7 +172,7 @@ def _step_budget(ctx: PipelineContext) -> dict:
     if intent_budgets:
         triage_budget_keys = frozenset(("proposal_max", "implementation_max"))
         cycle_budget_path = paths.cycle_budget(ctx.section.number)
-        existing_budget = read_json(cycle_budget_path)
+        existing_budget = Services.artifact_io().read_json(cycle_budget_path)
         if existing_budget is not None:
             existing_budget.update({
                 key: value
@@ -181,11 +183,11 @@ def _step_budget(ctx: PipelineContext) -> dict:
                     or key in triage_budget_keys
                 )
             })
-            write_json(cycle_budget_path, existing_budget)
+            Services.artifact_io().write_json(cycle_budget_path, existing_budget)
 
     cycle_budget_path = paths.cycle_budget(ctx.section.number)
     cycle_budget = {"proposal_max": 5, "implementation_max": 5}
-    loaded_budget = read_json(cycle_budget_path)
+    loaded_budget = Services.artifact_io().read_json(cycle_budget_path)
     if loaded_budget is not None:
         cycle_budget.update(loaded_budget)
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from signals.repository.artifact_io import read_json
 from containers import Services
 from orchestrator.path_registry import PathRegistry
 from risk.repository.history import compute_history_adjustment, pattern_signature, read_history
@@ -26,11 +25,10 @@ from risk.types import (
     clamp_int,
 )
 from risk.service.package_builder import write_package
-from risk.prompt.builders import build_risk_assessment_prompt, build_optimization_prompt
+from risk.prompt.writers import write_risk_assessment_prompt, write_optimization_prompt
 from risk.service.response_parser import parse_risk_assessment, parse_risk_plan
 from risk.service.posture_hysteresis import apply_posture_hysteresis
 from risk.service.fallback import fallback_plan, lightweight_fallback_plan
-from taskrouter import agent_for
 
 
 def run_risk_loop(
@@ -172,7 +170,7 @@ def _validate_and_dispatch_assessment(
     be parsed -- the caller decides what fallback to use.
     """
     tag = f"{prefix}-" if prefix else ""
-    prompt = build_risk_assessment_prompt(package, planspace, scope)
+    prompt = write_risk_assessment_prompt(package, planspace, scope)
     prompt_path = paths.risk_dir() / f"{scope}-{tag}risk-assessment-prompt.md"
     if not Services.prompt_guard().write_validated(prompt, prompt_path):
         return None
@@ -184,7 +182,7 @@ def _validate_and_dispatch_assessment(
         planspace,
         None,
         f"risk-assessor-{tag}{scope}",
-        agent_file=agent_for("risk.assess"),
+        agent_file=Services.task_router().agent_for("risk.assess"),
     )
     return parse_risk_assessment(response)
 
@@ -205,7 +203,7 @@ def _validate_and_dispatch_optimization(
     Returns ``None`` when the prompt fails validation *or* the response cannot
     be parsed.
     """
-    prompt = build_optimization_prompt(
+    prompt = write_optimization_prompt(
         assessment=assessment,
         package=package,
         parameters=parameters,
@@ -229,7 +227,7 @@ def _validate_and_dispatch_optimization(
         planspace,
         None,
         f"execution-optimizer-{scope}",
-        agent_file=agent_for("risk.optimize"),
+        agent_file=Services.task_router().agent_for("risk.optimize"),
     )
     return parse_risk_plan(response)
 
@@ -244,7 +242,7 @@ def _validate_and_dispatch_lightweight_optimization(
     dispatch_fn: Callable,
 ) -> RiskPlan | None:
     """Lightweight variant of optimization dispatch (includes try/except)."""
-    prompt = build_optimization_prompt(
+    prompt = write_optimization_prompt(
         assessment=assessment,
         package=package,
         parameters=parameters,
@@ -264,7 +262,7 @@ def _validate_and_dispatch_lightweight_optimization(
             planspace,
             None,
             f"execution-optimizer-light-{scope}",
-            agent_file=agent_for("risk.optimize"),
+            agent_file=Services.task_router().agent_for("risk.optimize"),
         )
     except Exception:
         return None
@@ -330,7 +328,7 @@ def _write_and_return_lightweight_fallback(
 
 def _load_parameters(paths: PathRegistry) -> dict:
     parameters = load_default_parameters()
-    raw = read_json(paths.risk_parameters())
+    raw = Services.artifact_io().read_json(paths.risk_parameters())
     if not isinstance(raw, dict):
         return parameters
 

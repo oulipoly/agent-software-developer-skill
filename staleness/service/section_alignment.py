@@ -5,13 +5,10 @@ from staleness.service.alignment import (
     extract_problems,
 )
 from orchestrator.path_registry import PathRegistry
-from dispatch.prompt.template import render_template
-from signals.service.communication import log
+from pipeline.template import render_template
 from containers import Services
-from proposal.helpers.verdict_parsers import parse_alignment_verdict as _parse_alignment_verdict
-from orchestrator.service.pipeline_control import poll_control_messages
+from staleness.helpers.verdict_parsers import parse_alignment_verdict as _parse_alignment_verdict
 from orchestrator.types import Section
-from taskrouter import agent_for
 
 
 def collect_modified_files(
@@ -22,7 +19,7 @@ def collect_modified_files(
         planspace,
         section,
         codespace,
-        logger=log,
+        logger=Services.logger().log,
     )
 
 
@@ -88,7 +85,7 @@ Reply with a JSON block:
         # Validate dynamic body before wrapping in template
         violations = Services.prompt_guard().validate_dynamic(dynamic_body)
         if violations:
-            log(f"Alignment adjudicate prompt safety violation: "
+            Services.logger().log(f"Alignment adjudicate prompt safety violation: "
                 f"{violations} — skipping dispatch")
             return None
 
@@ -103,7 +100,7 @@ Reply with a JSON block:
         adj_result = Services.dispatcher().dispatch(
             adjudicator_model, adj_prompt, adj_output,
             planspace, parent, codespace=codespace,
-            agent_file=agent_for("staleness.alignment_adjudicate"),
+            agent_file=Services.task_router().agent_for("staleness.alignment_adjudicate"),
         )
         if adj_result and adj_result != "ALIGNMENT_CHANGED_PENDING":
             try:
@@ -148,8 +145,8 @@ def _run_alignment_check_with_retries(
 
     paths = PathRegistry(planspace)
     for attempt in range(1, max_retries + 2):  # 1 initial + max_retries
-        ctrl = poll_control_messages(planspace, parent,
-                                     current_section=sec_num)
+        ctrl = Services.pipeline_control().poll_control_messages(
+            planspace, parent, current_section=sec_num)
         if ctrl == "alignment_changed":
             return "ALIGNMENT_CHANGED_PENDING"
         align_prompt = write_impl_alignment_prompt(
@@ -160,7 +157,7 @@ def _run_alignment_check_with_retries(
             model, align_prompt, align_output,
             planspace, parent, codespace=codespace,
             section_number=sec_num,
-            agent_file=agent_for("staleness.alignment_check"),
+            agent_file=Services.task_router().agent_for("staleness.alignment_check"),
         )
         if result == "ALIGNMENT_CHANGED_PENDING":
             return result
@@ -172,11 +169,11 @@ def _run_alignment_check_with_retries(
                 # invalid.  Do NOT retry; surface upward for parent
                 # intervention.  Retrying the same broken frame wastes
                 # cycles without fixing the root cause.
-                log(f"  alignment judge reported invalid frame for "
+                Services.logger().log(f"  alignment judge reported invalid frame for "
                     f"section {sec_num} — structural failure, "
                     f"requires parent intervention")
                 return "INVALID_FRAME"
             return result
-        log(f"  alignment check for section {sec_num} timed out "
+        Services.logger().log(f"  alignment check for section {sec_num} timed out "
             f"(attempt {attempt}/{max_retries + 1})")
     return None

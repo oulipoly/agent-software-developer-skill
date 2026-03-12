@@ -6,11 +6,6 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from signals.repository.artifact_io import read_json
-from staleness.service.change_tracker import (
-    check_pending as alignment_changed_pending,
-    make_alignment_checker,
-)
 from orchestrator.path_registry import PathRegistry
 from coordination.repository.notes import read_incoming_notes
 from proposal.repository.state import load_proposal_state
@@ -25,11 +20,7 @@ from risk.types import (
 )
 from proposal.service.readiness_resolver import resolve_readiness
 from containers import Services
-from signals.service.communication import AGENT_NAME, DB_SH, log, mailbox_send
-from orchestrator.service.pipeline_control import (
-    _section_inputs_hash,
-    handle_pending_messages,
-)
+from _config import AGENT_NAME, DB_SH
 from implementation.engine.runner import run_section
 from implementation.repository.roal_index import (
     IMPLEMENTATION_ROAL_KINDS,
@@ -63,7 +54,7 @@ class ImplementationPassRestart(Exception):
     """Raised when Phase 1 should restart after an alignment change."""
 
 
-_check_and_clear_alignment_changed = make_alignment_checker(DB_SH, AGENT_NAME)
+_check_and_clear_alignment_changed = Services.change_tracker().make_alignment_checker()
 
 
 def _persist_roal_artifacts(
@@ -79,7 +70,7 @@ def _persist_roal_artifacts(
             "path": str(accepted_artifact),
             "produced_by": "implementation_pass",
         })
-        log(
+        Services.logger().log(
             f"Section {sec_num}: persisted ROAL accepted frontier artifact "
             f"to {accepted_artifact}",
         )
@@ -90,7 +81,7 @@ def _persist_roal_artifacts(
             "path": str(deferred_artifact),
             "produced_by": "implementation_pass",
         })
-        log(
+        Services.logger().log(
             f"Section {sec_num}: persisted deferred ROAL artifact "
             f"in {deferred_artifact}",
         )
@@ -101,7 +92,7 @@ def _persist_roal_artifacts(
             "path": str(blocker_path),
             "produced_by": "implementation_pass",
         })
-        log(
+        Services.logger().log(
             f"Section {sec_num}: persisted ROAL reopen blocker "
             f"via {blocker_path}",
         )
@@ -220,7 +211,7 @@ def _maybe_reassess_deferred_steps(
     deferred_path = (
         paths.input_refs_dir(sec_num) / f"{scope}-risk-deferred.json"
     )
-    deferred_payload = read_json(deferred_path)
+    deferred_payload = Services.artifact_io().read_json(deferred_path)
     if not isinstance(deferred_payload, dict):
         return None
     if not risk_plan.deferred_steps:
@@ -309,7 +300,7 @@ def _run_risk_review(
                 posture_floor=hints["posture_floor"],
             )
 
-        log(
+        Services.logger().log(
             f"Section {sec_num}: ROAL plan accepted={len(plan.accepted_frontier)} "
             f"deferred={len(plan.deferred_steps)} reopened={len(plan.reopen_steps)}",
         )
@@ -318,7 +309,7 @@ def _run_risk_review(
         reason = str(exc) or exc.__class__.__name__
         append_risk_review_failure_history(planspace, package, reason)
         write_risk_review_failure_blocker(planspace, sec_num, reason)
-        log(
+        Services.logger().log(
             f"Section {sec_num}: ROAL review failed ({reason}) "
             "— wrote risk_review_failure blocker and skipped implementation",
         )
@@ -343,19 +334,19 @@ def run_implementation_pass(
     section_results: dict[str, SectionResult] = {}
 
     for sec_num in ready_sections:
-        if handle_pending_messages(planspace, [], impl_completed):
-            log("Aborted by parent during implementation pass")
-            mailbox_send(planspace, parent, "fail:aborted")
+        if Services.pipeline_control().handle_pending_messages(planspace, [], impl_completed):
+            Services.logger().log("Aborted by parent during implementation pass")
+            Services.communicator().mailbox_send(planspace, parent, "fail:aborted")
             raise ImplementationPassExit
 
-        if alignment_changed_pending(planspace):
+        if Services.pipeline_control().alignment_changed_pending(planspace):
             if _check_and_clear_alignment_changed(planspace):
-                log("Alignment changed during implementation pass "
+                Services.logger().log("Alignment changed during implementation pass "
                     "— restarting from Phase 1")
                 raise ImplementationPassRestart
 
         section = sections_by_num[sec_num]
-        log(f"=== Section {sec_num} implementation pass ===")
+        Services.logger().log(f"=== Section {sec_num} implementation pass ===")
         subprocess.run(  # noqa: S603
             [
                 "bash",
@@ -374,7 +365,7 @@ def run_implementation_pass(
 
         readiness = resolve_readiness(planspace, sec_num)
         if not readiness.get("ready"):
-            log(
+            Services.logger().log(
                 f"Section {sec_num}: implementation pass skipped — "
                 "readiness check failed before dispatch",
             )
@@ -402,7 +393,7 @@ def run_implementation_pass(
                 for decision in risk_plan.step_decisions
                 if decision.reason
             ]
-            log(
+            Services.logger().log(
                 f"Section {sec_num}: implementation skipped by ROAL — "
                 f"{reasons[0] if reasons else 'all steps rejected'}",
             )
@@ -418,12 +409,12 @@ def run_implementation_pass(
         )
 
         if _check_and_clear_alignment_changed(planspace):
-            log("Alignment changed during implementation — "
+            Services.logger().log("Alignment changed during implementation — "
                 "restarting from Phase 1")
             raise ImplementationPassRestart
 
         if modified_files is None:
-            log(f"Section {sec_num}: implementation returned None")
+            Services.logger().log(f"Section {sec_num}: implementation returned None")
             subprocess.run(  # noqa: S603
                 [
                     "bash",
@@ -463,7 +454,7 @@ def run_implementation_pass(
                     sec_num,
                     all_modified_files,
                 )
-                log(
+                Services.logger().log(
                     f"Section {sec_num}: wrote modified file manifest "
                     f"to {manifest_path}",
                 )
@@ -478,7 +469,7 @@ def run_implementation_pass(
 
                 frontier_iterations += 1
                 current_risk_plan = reassessed_plan
-                log(
+                Services.logger().log(
                     f"Section {sec_num}: reassessed deferred ROAL steps "
                     f"accepted={len(reassessed_plan.accepted_frontier)} "
                     f"deferred={len(reassessed_plan.deferred_steps)} "
@@ -489,7 +480,7 @@ def run_implementation_pass(
                 if not reassessed_plan.accepted_frontier:
                     break
 
-                log(
+                Services.logger().log(
                     f"Section {sec_num}: dispatching deferred frontier slice "
                     f"(iteration {frontier_iterations}, "
                     f"accepted={len(reassessed_plan.accepted_frontier)})",
@@ -504,12 +495,12 @@ def run_implementation_pass(
                 )
 
                 if _check_and_clear_alignment_changed(planspace):
-                    log("Alignment changed during deferred frontier execution "
+                    Services.logger().log("Alignment changed during deferred frontier execution "
                         "— restarting from Phase 1")
                     raise ImplementationPassRestart
 
                 if deferred_modified is None:
-                    log(f"Section {sec_num}: deferred frontier slice returned None")
+                    Services.logger().log(f"Section {sec_num}: deferred frontier slice returned None")
                     append_risk_history(
                         planspace,
                         sec_num,
@@ -544,7 +535,7 @@ def run_implementation_pass(
                         and bool(current_risk_plan.deferred_steps)
                     ),
                 )
-        mailbox_send(
+        Services.communicator().mailbox_send(
             planspace,
             parent,
             f"done:{sec_num}:{len(all_modified_files)} files modified",
@@ -560,18 +551,18 @@ def run_implementation_pass(
         baseline_hash_dir = paths.section_inputs_hashes_dir()
         baseline_hash_dir.mkdir(parents=True, exist_ok=True)
         paths.section_input_hash(sec_num).write_text(
-            _section_inputs_hash(sec_num, planspace, codespace, sections_by_num),
+            Services.pipeline_control().section_inputs_hash(sec_num, planspace, codespace, sections_by_num),
             encoding="utf-8",
         )
 
         phase2_hash_dir = paths.phase2_inputs_hashes_dir()
         phase2_hash_dir.mkdir(parents=True, exist_ok=True)
         paths.phase2_input_hash(sec_num).write_text(
-            _section_inputs_hash(sec_num, planspace, codespace, sections_by_num),
+            Services.pipeline_control().section_inputs_hash(sec_num, planspace, codespace, sections_by_num),
             encoding="utf-8",
         )
 
-        log(f"Section {sec_num}: implementation done")
+        Services.logger().log(f"Section {sec_num}: implementation done")
         subprocess.run(  # noqa: S603
             [
                 "bash",

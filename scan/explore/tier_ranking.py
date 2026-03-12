@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, rename_malformed, write_json
-from staleness.helpers.hashing import content_hash
+from containers import Services
 from scan.service.template_loader import load_scan_template
-from dispatch.service.prompt_guard import validate_dynamic_content
 from scan.codemap.cache import strip_scan_summaries
 from scan.cli_dispatch import dispatch_agent
-from taskrouter import agent_for
 
 
 def validate_tier_file(tier_file: Path) -> bool:
     """Validate tier file structure: valid JSON with required fields."""
-    data = read_json(tier_file)
+    data = Services.artifact_io().read_json(tier_file)
     if data is None:
         return False
 
@@ -54,7 +50,7 @@ def run_tier_ranking(
     tier_inputs = strip_scan_summaries(raw_section) + "\n" + "\n".join(
         sorted(related_files),
     )
-    tier_inputs_hash = content_hash(tier_inputs)
+    tier_inputs_hash = Services.hasher().content_hash(tier_inputs)
 
     if tier_file.is_file():
         if not validate_tier_file(tier_file):
@@ -63,7 +59,7 @@ def run_tier_ranking(
                 "(missing scan_now or bad schema) — preserving as "
                 ".malformed.json and regenerating",
             )
-            if rename_malformed(tier_file) is None:
+            if Services.artifact_io().rename_malformed(tier_file) is None:
                 tier_file.unlink()
         elif (
             tier_inputs_sidecar.is_file()
@@ -90,7 +86,7 @@ def run_tier_ranking(
         file_list_text=file_list_text,
         tier_file=tier_file,
     )
-    violations = validate_dynamic_content(prompt)
+    violations = Services.prompt_guard().validate_dynamic(prompt)
     if violations:
         print(
             f"[TIER] {section_name}: prompt blocked — "
@@ -105,7 +101,7 @@ def run_tier_ranking(
         model=tier_model,
         project=codespace,
         prompt_file=tier_prompt,
-        agent_file=agent_for("scan.tier_rank"),
+        agent_file=Services.task_router().agent_for("scan.tier_rank"),
         stdout_file=tier_output,
     )
 
@@ -120,7 +116,7 @@ def run_tier_ranking(
             model=escalation_model,
             project=codespace,
             prompt_file=tier_prompt,
-            agent_file=agent_for("scan.tier_rank"),
+            agent_file=Services.task_router().agent_for("scan.tier_rank"),
             stdout_file=tier_output,
         )
         if result.returncode == 0:
@@ -136,7 +132,7 @@ def run_tier_ranking(
             signals_dir = artifacts_dir / "signals"
             signals_dir.mkdir(parents=True, exist_ok=True)
             fail_path = signals_dir / f"{section_name}-tier-ranking-failed.json"
-            write_json(
+            Services.artifact_io().write_json(
                 fail_path,
                 {
                     "section": section_name,

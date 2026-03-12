@@ -9,11 +9,9 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
-from staleness.service.change_tracker import make_alignment_checker
 from intake.service.assessment import promote_debt_signals
 from intake.repository.loader import bootstrap_governance_if_missing, build_governance_indexes
 from coordination.engine.loop import run_coordination_loop
-from staleness.service.global_recheck import run_global_alignment_recheck
 from implementation.engine.implementation_pass import (
     ImplementationPassExit,
     ImplementationPassRestart,
@@ -22,13 +20,11 @@ from implementation.engine.implementation_pass import (
 from orchestrator.path_registry import PathRegistry
 from scan.service.project_mode import resolve_project_mode, write_mode_contract
 from proposal.engine.proposal_pass import ProposalPassExit, run_proposal_pass
-from reconciliation.engine.phase import ReconciliationPhaseExit, ReconciliationResult, run_reconciliation_phase
+from reconciliation.engine.phase import ReconciliationPhaseExit, run_reconciliation_phase
 from scan.service.section_loader import load_sections
 
+from _config import AGENT_NAME, DB_SH
 from signals.service.communication import (
-    AGENT_NAME,
-    DB_SH,
-    log,
     mailbox_cleanup,
     mailbox_register,
 )
@@ -37,7 +33,7 @@ from orchestrator.engine.strategic_state import build_strategic_state
 from orchestrator.types import SectionResult
 
 
-_check_and_clear_alignment_changed = make_alignment_checker(DB_SH, AGENT_NAME)
+_check_and_clear_alignment_changed = Services.change_tracker().make_alignment_checker()
 
 
 def main() -> None:
@@ -79,14 +75,14 @@ def main() -> None:
         check=True, capture_output=True, text=True,
     )
     mailbox_register(args.planspace)
-    log(f"Registered: {AGENT_NAME} (parent: {args.parent})")
+    Services.logger().log(f"Registered: {AGENT_NAME} (parent: {args.parent})")
 
     try:
         _run_loop(args.planspace, args.codespace, args.parent, sections_dir,
                   args.global_proposal, args.global_alignment)
     finally:
         mailbox_cleanup(args.planspace)
-        log("Mailbox cleaned up")
+        Services.logger().log("Mailbox cleaned up")
 
 
 def _run_loop(planspace: Path, codespace: Path, parent: str,
@@ -108,7 +104,7 @@ def _run_loop(planspace: Path, codespace: Path, parent: str,
 
     sections_by_num = {s.number: s for s in all_sections}
 
-    log(f"Loaded {len(all_sections)} sections")
+    Services.logger().log(f"Loaded {len(all_sections)} sections")
 
     # Outer loop: alignment_changed during Phase 2 restarts from Phase 1.
     # Each iteration runs Phase 1 (per-section) then Phase 2 (global).
@@ -192,7 +188,7 @@ def _run_loop(planspace: Path, codespace: Path, parent: str,
             sec_num for sec_num, result in section_results.items()
             if result.aligned
         ]
-        log(f"=== Phase 1 complete: {len(implemented_sections)} sections "
+        Services.logger().log(f"=== Phase 1 complete: {len(implemented_sections)} sections "
             f"implemented, {len(blocked_sections)} blocked ===")
 
         # Write strategic state snapshot after Phase 1
@@ -203,9 +199,9 @@ def _run_loop(planspace: Path, codespace: Path, parent: str,
         # post-implementation assessment into risk-register staging.
         promoted = promote_debt_signals(planspace)
         if promoted:
-            log(f"Stabilization: promoted {len(promoted)} debt entries to staging")
+            Services.logger().log(f"Stabilization: promoted {len(promoted)} debt entries to staging")
 
-        phase2_status = run_global_alignment_recheck(
+        phase2_status = Services.section_alignment().run_global_recheck(
             sections_by_num,
             section_results,
             planspace,

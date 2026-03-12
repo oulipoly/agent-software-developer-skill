@@ -22,13 +22,10 @@ from dispatch.prompt.helpers import (
 )
 
 from containers import Services
-from staleness.service.section_alignment import collect_modified_files
-from signals.service.communication import _log_artifact, log
-from taskrouter.agents import resolve_agent_path
-from orchestrator.service.context_assembly import materialize_context_sidecar
+from dispatch.service.context_sidecar import materialize_context_sidecar
 from orchestrator.types import Section
 from dispatch.prompt.context import build_prompt_context
-from dispatch.prompt.template import load_template, render
+from pipeline.template import load_template, render
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +74,7 @@ def _write_prompt(
     sidecar_path = None
     if sidecar_agent is not None:
         sidecar_path = materialize_context_sidecar(
-            str(resolve_agent_path(sidecar_agent)),
+            str(Services.task_router().resolve_agent_path(sidecar_agent)),
             planspace, section=section.number,
         )
 
@@ -88,7 +85,7 @@ def _write_prompt(
     if sidecar_agent is not None:
         violations = Services.prompt_guard().validate_dynamic(rendered)
         if violations:
-            log(f"  ERROR: prompt {prompt_path.name} blocked — template "
+            Services.logger().log(f"  ERROR: prompt {prompt_path.name} blocked — template "
                 f"violations: {violations}")
             return None
 
@@ -99,10 +96,10 @@ def _write_prompt(
                 f.write(scoped_context_block(sidecar_path))
     else:
         if not Services.prompt_guard().write_validated(rendered, prompt_path):
-            log(f"  ERROR: prompt {prompt_path.name} blocked — template violations")
+            Services.logger().log(f"  ERROR: prompt {prompt_path.name} blocked — template violations")
             return None
 
-    _log_artifact(planspace, log_label)
+    Services.communicator().log_artifact(planspace, log_label)
     return prompt_path
 
 
@@ -448,7 +445,7 @@ def write_impl_alignment_prompt(
 
         # Collect modified files and union with related files
         all_paths = set(section.related_files) | set(
-            collect_modified_files(planspace, section, codespace)
+            Services.section_alignment().collect_modified_files(planspace, section, codespace)
         )
         impl_files_block = format_existing_file_listing(codespace, all_paths)
 
@@ -496,7 +493,7 @@ def write_impl_alignment_prompt(
         else:
             todos_dir = paths.todos_dir()
             if todos_dir.is_dir() and any(todos_dir.iterdir()):
-                log(
+                Services.logger().log(
                     f"Section {sec}: TODO file not found at "
                     f"{todo_path} but todos/ directory is non-empty"
                 )

@@ -8,13 +8,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from signals.repository.artifact_io import read_json
 from orchestrator.path_registry import PathRegistry
-from dispatch.prompt.template import SRC_TEMPLATE_DIR, TASK_SUBMISSION_SEMANTICS, load_template, render
+from pipeline.template import SRC_TEMPLATE_DIR, TASK_SUBMISSION_SEMANTICS, load_template, render
 from containers import Services
-from signals.service.communication import _log_artifact, log
-from orchestrator.service.context_assembly import materialize_context_sidecar
-from taskrouter.agents import resolve_agent_path
+from dispatch.service.context_sidecar import materialize_context_sidecar
 
 
 def write_fix_prompt(
@@ -57,12 +54,12 @@ def write_fix_prompt(
     })
     violations = Services.prompt_guard().validate_dynamic(rendered)
     if violations:
-        log(f"  ERROR: prompt {prompt_path.name} blocked — template "
+        Services.logger().log(f"  ERROR: prompt {prompt_path.name} blocked — template "
             f"violations: {violations}")
         return None
 
     sidecar_path = materialize_context_sidecar(
-        str(resolve_agent_path("coordination-fixer.md")),
+        str(Services.task_router().resolve_agent_path("coordination-fixer.md")),
         planspace,
     )
 
@@ -74,7 +71,7 @@ def write_fix_prompt(
                 f"Agent context sidecar with resolved inputs: "
                 f"`{sidecar_path}`\n"
             )
-    _log_artifact(planspace, f"prompt:coordinator-fix-{group_id}")
+    Services.communicator().log_artifact(planspace, f"prompt:coordinator-fix-{group_id}")
     return prompt_path
 
 
@@ -147,7 +144,7 @@ def write_bridge_prompt(
     })
     if not Services.prompt_guard().write_validated(rendered, bridge_prompt):
         return None
-    _log_artifact(planspace, f"prompt:bridge-resolve-{group_index}")
+    Services.communicator().log_artifact(planspace, f"prompt:bridge-resolve-{group_index}")
     return bridge_prompt
 
 
@@ -228,7 +225,7 @@ def _format_tools_block(paths: PathRegistry) -> str:
         )
     if not tool_registry_path.exists():
         return ""
-    reg = read_json(tool_registry_path)
+    reg = Services.artifact_io().read_json(tool_registry_path)
     if reg is not None:
         cross_tools = [
             t for t in (reg if isinstance(reg, list)

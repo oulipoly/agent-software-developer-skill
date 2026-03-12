@@ -31,7 +31,7 @@ from flow.types.schema import (
 )
 from flow.engine.submitter import new_flow_id
 
-from signals.service.communication import log
+from containers import Services
 
 def ingest_task_requests(signal_path: Path) -> list[dict]:
     """Read and parse a task-request signal file.
@@ -54,7 +54,7 @@ def ingest_task_requests(signal_path: Path) -> list[dict]:
         Use :func:`ingest_and_submit` instead, which submits tasks into
         the queue with flow metadata rather than returning raw dicts.
     """
-    return _ingest_task_requests(signal_path, logger=log)
+    return _ingest_task_requests(signal_path, logger=Services.logger().log)
 
 
 def ingest_and_submit(
@@ -82,7 +82,7 @@ def ingest_and_submit(
 
     Returns list of submitted task IDs.
     """
-    decl = _parse_signal_file(signal_path, logger=log)
+    decl = _parse_signal_file(signal_path, logger=Services.logger().log)
     if decl is None:
         return []
 
@@ -90,7 +90,6 @@ def ingest_and_submit(
     # task_dispatcher → task_flow → flow_reconciler → plan_executor
     # → section_engine → reexplore → task_ingestion → task_flow
     from flow.service.task_flow import (
-        compute_section_freshness,
         submit_chain,
         submit_fanout,
     )
@@ -106,7 +105,7 @@ def ingest_and_submit(
             token: str | None = None
             section_scope = find_first_section_scope(action.steps)
             if section_scope:
-                token = compute_section_freshness(
+                token = Services.freshness().compute(
                     planspace, section_scope,
                 )
             task_ids = submit_chain(
@@ -142,11 +141,11 @@ def ingest_and_submit(
             # branch task_ids are not directly returned here but are
             # in the DB for the dispatcher to find.
         else:
-            log(f"  task_ingestion: WARNING — unknown action type "
+            Services.logger().log(f"  task_ingestion: WARNING — unknown action type "
                 f"{type(action).__name__}, skipping")
 
     if all_task_ids:
-        log(f"  task_ingestion: submitted {len(all_task_ids)} tasks "
+        Services.logger().log(f"  task_ingestion: submitted {len(all_task_ids)} tasks "
             f"to queue (submitted_by={submitted_by})")
 
     return all_task_ids

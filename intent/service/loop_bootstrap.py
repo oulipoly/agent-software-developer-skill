@@ -4,14 +4,18 @@ from pathlib import Path
 from typing import Any
 
 from containers import Services
-from signals.repository.artifact_io import write_json
-from staleness.helpers.hashing import content_hash, file_hash
-from intent.service import philosophy as _philosophy_bootstrap
+from intent.service.philosophy_bootstrap import (
+    ensure_global_philosophy as _ensure_global_philosophy,
+    sha256_file as _sha256_file_impl,
+    validate_philosophy_grounding as _validate_grounding,
+)
+from intent.service.philosophy_catalog import (
+    build_philosophy_catalog as _build_catalog,
+    walk_md_bounded as _walk_bounded,
+)
 from orchestrator.path_registry import PathRegistry
 
-from signals.service.communication import _log_artifact, log
 from orchestrator.types import Section
-from taskrouter import agent_for
 
 
 
@@ -22,7 +26,7 @@ def _walk_md_bounded(
     exclude_top_dirs: frozenset[str] = frozenset(),
     extensions: frozenset[str] = frozenset({".md"}),
 ):
-    return _philosophy_bootstrap.walk_md_bounded(
+    return _walk_bounded(
         root,
         max_depth=max_depth,
         exclude_top_dirs=exclude_top_dirs,
@@ -39,7 +43,7 @@ def _build_philosophy_catalog(
     max_depth: int = 3,
     extensions: frozenset[str] = frozenset({".md"}),
 ) -> list[dict]:
-    return _philosophy_bootstrap.build_philosophy_catalog(
+    return _build_catalog(
         planspace,
         codespace,
         max_files=max_files,
@@ -54,7 +58,7 @@ def _validate_philosophy_grounding(
     source_map_path: Path,
     artifacts: Path,
 ) -> bool:
-    return _philosophy_bootstrap.validate_philosophy_grounding(
+    return _validate_grounding(
         philosophy_path,
         source_map_path,
         artifacts,
@@ -62,7 +66,7 @@ def _validate_philosophy_grounding(
 
 
 def _sha256_file(path: Path) -> str:
-    return _philosophy_bootstrap.sha256_file(path)
+    return _sha256_file_impl(path)
 
 
 def _compute_intent_pack_hash(
@@ -91,10 +95,10 @@ def _compute_intent_pack_hash(
         _sha256_file(corrections_path),
         _sha256_file(philosophy_path),
         _sha256_file(todos_path),
-        content_hash(incoming_notes),
+        Services.hasher().content_hash(incoming_notes),
     ]
     combined = ":".join(parts)
-    return content_hash(combined)
+    return Services.hasher().content_hash(combined)
 
 
 def ensure_global_philosophy(
@@ -102,7 +106,7 @@ def ensure_global_philosophy(
     codespace: Path,
     parent: str,
 ) -> dict[str, Any]:
-    return _philosophy_bootstrap.ensure_global_philosophy(
+    return _ensure_global_philosophy(
         planspace,
         codespace,
         parent,
@@ -160,15 +164,15 @@ def generate_intent_pack(
     if (problem_path.exists() and problem_path.stat().st_size > 0
             and rubric_path.exists() and rubric_path.stat().st_size > 0
             and input_hash == prev_hash and prev_hash):
-        log(f"Section {sec}: intent pack exists, inputs unchanged "
+        Services.logger().log(f"Section {sec}: intent pack exists, inputs unchanged "
             "— skipping generation")
         return intent_sec
 
     if (problem_path.exists() and problem_path.stat().st_size > 0
             and rubric_path.exists() and rubric_path.stat().st_size > 0):
-        log(f"Section {sec}: intent pack inputs changed — regenerating")
+        Services.logger().log(f"Section {sec}: intent pack inputs changed — regenerating")
     else:
-        log(f"Section {sec}: generating intent pack")
+        Services.logger().log(f"Section {sec}: generating intent pack")
 
     inputs_block = f"1. Section spec: `{section.path}`\n"
     if proposal_excerpt.exists():
@@ -280,7 +284,7 @@ Write an empty surface registry to: `{intent_sec / "surface-registry.json"}`
 """
     if not Services.prompt_guard().write_validated(pack_prompt_text, prompt_path):
         return None
-    _log_artifact(planspace, f"prompt:intent-pack-{sec}")
+    Services.communicator().log_artifact(planspace, f"prompt:intent-pack-{sec}")
 
     result = Services.dispatcher().dispatch(
         Services.policies().resolve(policy,"intent_pack"),
@@ -290,7 +294,7 @@ Write an empty surface registry to: `{intent_sec / "surface-registry.json"}`
         parent,
         codespace=codespace,
         section_number=sec,
-        agent_file=agent_for("intent.pack_generator"),
+        agent_file=Services.task_router().agent_for("intent.pack_generator"),
     )
 
     if result == "ALIGNMENT_CHANGED_PENDING":
@@ -299,16 +303,16 @@ Write an empty surface registry to: `{intent_sec / "surface-registry.json"}`
     # Ensure surface registry exists
     registry_path = intent_sec / "surface-registry.json"
     if not registry_path.exists():
-        write_json(
+        Services.artifact_io().write_json(
             registry_path,
             {"section": sec, "next_id": 1, "surfaces": []},
         )
 
     if problem_path.exists() and rubric_path.exists():
-        log(f"Section {sec}: intent pack generated")
+        Services.logger().log(f"Section {sec}: intent pack generated")
         # V3/R59: Write input hash so future runs can detect changes
         hash_file.write_text(input_hash, encoding="utf-8")
     else:
-        log(f"Section {sec}: intent pack generation incomplete")
+        Services.logger().log(f"Section {sec}: intent pack generation incomplete")
 
     return intent_sec

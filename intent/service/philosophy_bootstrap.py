@@ -14,14 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from containers import Services
-from signals.repository.artifact_io import read_json, write_json
-from staleness.helpers.hashing import content_hash
 from orchestrator.path_registry import PathRegistry
-from signals.service.communication import _log_artifact, log
-from taskrouter import agent_for
 
 from intent.service.philosophy_classifier import (
-    VALID_SOURCE_TYPES,
     _classify_distiller_result,
     _classify_guidance_result,
     _classify_selector_result,
@@ -95,7 +90,7 @@ def _write_bootstrap_status(
     detail: str,
 ) -> None:
     signal_path = _bootstrap_signal_path(paths)
-    write_json(_bootstrap_status_path(paths), {
+    Services.artifact_io().write_json(_bootstrap_status_path(paths), {
         "bootstrap_state": bootstrap_state,
         "blocking_state": blocking_state,
         "source_mode": source_mode,
@@ -123,7 +118,7 @@ def _write_bootstrap_signal(
     }
     if extras:
         payload.update(extras)
-    write_json(_bootstrap_signal_path(paths), payload)
+    Services.artifact_io().write_json(_bootstrap_signal_path(paths), payload)
 
 
 def _bootstrap_result(
@@ -184,7 +179,7 @@ def _write_bootstrap_diagnostics(
     attempts: list[dict[str, Any]],
     final_outcome: str,
 ) -> None:
-    write_json(_bootstrap_diagnostics_path(paths), {
+    Services.artifact_io().write_json(_bootstrap_diagnostics_path(paths), {
         "stage": stage,
         "attempts": attempts,
         "final_outcome": final_outcome,
@@ -256,7 +251,7 @@ def _run_bootstrap_prompter(
         paths,
     )
     if not context_artifacts:
-        log("Intent bootstrap: no project-shaping artifacts available for "
+        Services.logger().log("Intent bootstrap: no project-shaping artifacts available for "
             "bootstrap guidance — skipping optional prompter")
         return None
 
@@ -309,10 +304,10 @@ Write JSON to: `{guidance_path}`
 - If the artifacts do not support meaningful project-shaped prompts, write an empty `prompts` list and explain the context in `project_frame`
 """
     if not Services.prompt_guard().write_validated(prompt_text, prompt_path):
-        log("Intent bootstrap: bootstrap guidance prompt validation failed "
+        Services.logger().log("Intent bootstrap: bootstrap guidance prompt validation failed "
             "— continuing without optional guidance")
         return None
-    _log_artifact(planspace, "prompt:philosophy-bootstrap-guidance")
+    Services.communicator().log_artifact(planspace, "prompt:philosophy-bootstrap-guidance")
 
     guidance_path.unlink(missing_ok=True)
     result = Services.dispatcher().dispatch(
@@ -322,7 +317,7 @@ Write JSON to: `{guidance_path}`
         planspace,
         parent,
         codespace=codespace,
-        agent_file=agent_for("intent.philosophy_bootstrap"),
+        agent_file=Services.task_router().agent_for("intent.philosophy_bootstrap"),
     )
     if result == "ALIGNMENT_CHANGED_PENDING":
         return None
@@ -331,7 +326,7 @@ Write JSON to: `{guidance_path}`
     if classification["state"] == "valid_nonempty":
         return classification["data"]
 
-    log("Intent bootstrap: optional bootstrap guidance produced "
+    Services.logger().log("Intent bootstrap: optional bootstrap guidance produced "
         f"{classification['state']} — continuing without it")
     return None
 
@@ -484,7 +479,7 @@ def _grounding_failure_source_mode(
         if source_types:
             return "repo_sources"
 
-    status = read_json(_bootstrap_status_path(paths))
+    status = Services.artifact_io().read_json(_bootstrap_status_path(paths))
     if isinstance(status, dict):
         mode = status.get("source_mode")
         if mode in {"user_source", "repo_sources"}:
@@ -495,8 +490,7 @@ def _grounding_failure_source_mode(
 
 def sha256_file(path: Path) -> str:
     """Return hex sha256 of file contents, or empty string on error."""
-    from staleness.helpers.hashing import file_hash
-    return file_hash(path)
+    return Services.hasher().file_hash(path)
 
 
 def validate_philosophy_grounding(
@@ -518,9 +512,9 @@ def validate_philosophy_grounding(
         )
         extras = {}
     elif source_map_path.exists():
-        source_map = read_json(source_map_path)
+        source_map = Services.artifact_io().read_json(source_map_path)
         if source_map is None:
-            log("Intent bootstrap: malformed source map — "
+            Services.logger().log("Intent bootstrap: malformed source map — "
                 "preserving as .malformed.json")
             detail = (
                 "Philosophy source map is malformed. Section execution will "
@@ -637,12 +631,12 @@ def ensure_global_philosophy(
     if philosophy_path.exists() and philosophy_path.stat().st_size > 0:
         source_map_path = intent_global / "philosophy-source-map.json"
         if not source_map_path.exists():
-            log("Intent bootstrap: philosophy exists but source-map "
+            Services.logger().log("Intent bootstrap: philosophy exists but source-map "
                 "missing — regenerating (fail-closed)")
         else:
             manifest_path = intent_global / "philosophy-source-manifest.json"
             if manifest_path.exists():
-                manifest = read_json(manifest_path)
+                manifest = Services.artifact_io().read_json(manifest_path)
                 if isinstance(manifest, dict):
                     sources_changed = False
                     for entry in manifest.get("sources", []):
@@ -665,16 +659,16 @@ def ensure_global_philosophy(
                         current_catalog = build_philosophy_catalog(
                             planspace, codespace,
                         )
-                        current_fp = content_hash(
+                        current_fp = Services.hasher().content_hash(
                             json.dumps(current_catalog, sort_keys=True),
                         )
                         if prev_fp != current_fp:
                             catalog_changed = True
-                            log("Intent bootstrap: philosophy candidate "
+                            Services.logger().log("Intent bootstrap: philosophy candidate "
                                 "catalog changed — rerunning selector")
 
                     if sources_changed:
-                        log("Intent bootstrap: philosophy sources "
+                        Services.logger().log("Intent bootstrap: philosophy sources "
                             "changed — regenerating")
                     elif not catalog_changed:
                         _clear_bootstrap_signal(paths)
@@ -697,7 +691,7 @@ def ensure_global_philosophy(
                             detail=ready_detail,
                         )
                 else:
-                    log("Intent bootstrap: source manifest malformed — "
+                    Services.logger().log("Intent bootstrap: source manifest malformed — "
                         "regenerating philosophy")
             else:
                 _clear_bootstrap_signal(paths)
@@ -728,9 +722,9 @@ def ensure_global_philosophy(
 
     catalog = build_philosophy_catalog(planspace, codespace)
     catalog_path = paths.philosophy_candidate_catalog()
-    write_json(catalog_path, catalog)
+    Services.artifact_io().write_json(catalog_path, catalog)
     if source_records is None and not catalog:
-        log("Intent bootstrap: no markdown files found for philosophy "
+        Services.logger().log("Intent bootstrap: no markdown files found for philosophy "
             "catalog — requesting user bootstrap input")
         return _request_user_philosophy(
             paths,
@@ -863,7 +857,7 @@ If NO files contain cross-cutting reasoning philosophy, write:
                     "files until the prompt is valid."
                 ),
             )
-        _log_artifact(planspace, "prompt:philosophy-select")
+        Services.communicator().log_artifact(planspace, "prompt:philosophy-select")
 
         selector_models = [
             Services.policies().resolve(policy,"intent_philosophy_selector"),
@@ -880,7 +874,7 @@ If NO files contain cross-cutting reasoning philosophy, write:
             planspace=planspace,
             parent=parent,
             codespace=codespace,
-            agent_file=agent_for("intent.philosophy_selector"),
+            agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
         )
         selected_classification = selector_run["classification"]
 
@@ -893,7 +887,7 @@ If NO files contain cross-cutting reasoning philosophy, write:
                 final_outcome="selected",
             )
         elif selected_classification["state"] == "valid_empty":
-            log("Intent bootstrap: source selector found no philosophy "
+            Services.logger().log("Intent bootstrap: source selector found no philosophy "
                 "files in the repository catalog")
             _write_bootstrap_diagnostics(
                 paths,
@@ -976,14 +970,14 @@ If NO files contain cross-cutting reasoning philosophy, write:
         )
         if extra:
             expanded_exts = frozenset({".md"}) | extra
-            log(f"Intent bootstrap: selector requested extensions "
+            Services.logger().log(f"Intent bootstrap: selector requested extensions "
                 f"{sorted(extra)} — rebuilding catalog (one-shot)")
             catalog = build_philosophy_catalog(
                 planspace,
                 codespace,
                 extensions=expanded_exts,
             )
-            write_json(catalog_path, catalog)
+            Services.artifact_io().write_json(catalog_path, catalog)
 
             expanded_run = _dispatch_classified_signal_stage(
                 stage_name="selector-extension-pass",
@@ -995,16 +989,16 @@ If NO files contain cross-cutting reasoning philosophy, write:
                 planspace=planspace,
                 parent=parent,
                 codespace=codespace,
-                agent_file=agent_for("intent.philosophy_selector"),
+                agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
             )
             expanded_classification = expanded_run["classification"]
             if expanded_classification["state"] == "valid_nonempty":
                 selected = expanded_classification["data"]
             elif expanded_classification["state"] == "valid_empty":
-                log("Intent bootstrap: extension pass found no additional "
+                Services.logger().log("Intent bootstrap: extension pass found no additional "
                     "philosophy sources — keeping original selection")
             else:
-                log("Intent bootstrap: extension pass produced "
+                Services.logger().log("Intent bootstrap: extension pass produced "
                     f"{expanded_classification['state']} — keeping original "
                     "selection")
 
@@ -1039,7 +1033,7 @@ If NO files contain cross-cutting reasoning philosophy, write:
                 })
 
     if shortlisted:
-        log(f"Intent bootstrap: verifying {len(shortlisted)} shortlisted "
+        Services.logger().log(f"Intent bootstrap: verifying {len(shortlisted)} shortlisted "
             "philosophy candidate(s) (full-read invariant check)")
         verify_prompt = paths.philosophy_verify_prompt()
         verify_output = paths.philosophy_verify_output()
@@ -1109,7 +1103,7 @@ Write a JSON signal to: `{verify_signal}`
                     "until the verifier prompt is valid."
                 ),
             )
-        _log_artifact(planspace, "prompt:philosophy-verify")
+        Services.communicator().log_artifact(planspace, "prompt:philosophy-verify")
 
         verifier_model = Services.policies().resolve(policy,"intent_philosophy_verifier")
         verify_run = _dispatch_classified_signal_stage(
@@ -1126,16 +1120,16 @@ Write a JSON signal to: `{verify_signal}`
             planspace=planspace,
             parent=parent,
             codespace=codespace,
-            agent_file=agent_for("intent.philosophy_verifier"),
+            agent_file=Services.task_router().agent_for("intent.philosophy_verifier"),
         )
         verified_classification = verify_run["classification"]
         if verified_classification["state"] == "valid_nonempty":
             verified = verified_classification["data"]
             selected["sources"] = verified["verified_sources"]
-            log(f"Intent bootstrap: verifier confirmed "
+            Services.logger().log(f"Intent bootstrap: verifier confirmed "
                 f"{len(verified['verified_sources'])} philosophy source(s)")
         elif verified_classification["state"] == "valid_empty":
-            log("Intent bootstrap: verifier rejected all shortlisted "
+            Services.logger().log("Intent bootstrap: verifier rejected all shortlisted "
                 "philosophy candidates")
             return _request_user_philosophy(
                 paths,
@@ -1193,7 +1187,7 @@ Write a JSON signal to: `{verify_signal}`
     if (not isinstance(selected, dict)
             or not isinstance(selected.get("sources"), list)
             or not selected["sources"]):
-        log("Intent bootstrap: selector stage ended without a usable "
+        Services.logger().log("Intent bootstrap: selector stage ended without a usable "
             "source set — blocking section (fail-closed)")
         return _block_bootstrap(
             paths,
@@ -1225,7 +1219,7 @@ Write a JSON signal to: `{verify_signal}`
         for source in selected_sources
     ]
     if not sources:
-        log("Intent bootstrap: selected source paths do not exist — "
+        Services.logger().log("Intent bootstrap: selected source paths do not exist — "
             "skipping distillation (fail-closed)")
         return _block_bootstrap(
             paths,
@@ -1245,7 +1239,7 @@ Write a JSON signal to: `{verify_signal}`
             ),
         )
 
-    log(
+    Services.logger().log(
         "Intent bootstrap: distilling operational philosophy from "
         f"{len(sources)} "
         f"{'user-provided' if source_mode == 'user_source' else 'selected'} "
@@ -1342,7 +1336,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
                 "distiller prompt is valid."
             ),
         )
-    _log_artifact(planspace, "prompt:philosophy-distill")
+    Services.communicator().log_artifact(planspace, "prompt:philosophy-distill")
 
     distiller_model = Services.policies().resolve(policy,"intent_philosophy")
     distill_classification: dict[str, Any] = {"state": "missing_signal", "data": None}
@@ -1354,7 +1348,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
             planspace,
             parent,
             codespace=codespace,
-            agent_file=agent_for("intent.philosophy_distiller"),
+            agent_file=Services.task_router().agent_for("intent.philosophy_distiller"),
         )
 
         if result == "ALIGNMENT_CHANGED_PENDING":
@@ -1373,14 +1367,14 @@ genuinely ambiguous, do NOT invent filler. Instead:
         if distill_classification["state"] == "valid_nonempty":
             break
         if attempt < 2:
-            log("Intent bootstrap: distiller produced "
+            Services.logger().log("Intent bootstrap: distiller produced "
                 f"{distill_classification['state']} on attempt {attempt}/2 "
                 f"— retrying with {distiller_model}")
 
     if distill_classification["state"] != "valid_nonempty":
         if distill_classification["state"] == "valid_empty":
             if source_mode == "user_source":
-                log("Intent bootstrap: user philosophy source needs follow-up "
+                Services.logger().log("Intent bootstrap: user philosophy source needs follow-up "
                     "clarification before principles can be distilled")
                 if not decisions_path.exists() or decisions_path.stat().st_size == 0:
                     guidance = None
@@ -1431,7 +1425,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
                 "cross-cutting reasoning philosophy. Section execution "
                 "will be blocked until philosophy is available."
             )
-            log("Intent bootstrap: distiller found no extractable "
+            Services.logger().log("Intent bootstrap: distiller found no extractable "
                 "philosophy in verified sources")
             return _request_user_philosophy(
                 paths,
@@ -1467,7 +1461,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
                 "Section execution will be blocked until bootstrap is "
                 "repaired."
             )
-        log("Intent bootstrap: philosophy distillation failed — "
+        Services.logger().log("Intent bootstrap: philosophy distillation failed — "
             f"{distill_classification['state']} (fail-closed, blocking section)")
         extras = {"sources": [str(source["path"]) for source in sources]}
         preserved = distill_classification.get("preserved")
@@ -1494,7 +1488,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
         paths.artifacts,
     )
     if not grounding_ok:
-        log("Intent bootstrap: philosophy grounding validation failed "
+        Services.logger().log("Intent bootstrap: philosophy grounding validation failed "
             "— blocking section (fail-closed)")
         return _bootstrap_result(
             status="failed",
@@ -1507,7 +1501,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
         )
 
     manifest_path = intent_global / "philosophy-source-manifest.json"
-    write_json(manifest_path, {
+    Services.artifact_io().write_json(manifest_path, {
         "sources": [
             {
                 "path": str(source["path"]),
@@ -1519,7 +1513,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
     })
 
     catalog_fp_path = intent_global / "philosophy-catalog-fingerprint.txt"
-    catalog_fp = content_hash(json.dumps(catalog, sort_keys=True))
+    catalog_fp = Services.hasher().content_hash(json.dumps(catalog, sort_keys=True))
     catalog_fp_path.write_text(catalog_fp, encoding="utf-8")
 
     _clear_bootstrap_signal(paths)

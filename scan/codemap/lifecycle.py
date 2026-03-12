@@ -7,16 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signals.repository.artifact_io import read_json, rename_malformed
 from orchestrator.path_registry import PathRegistry
 from scan.service.section_notes import log_phase_failure
 from scan.service.template_loader import load_scan_template
 
-from dispatch.service.prompt_guard import validate_dynamic_content
-
 from scan.cli_dispatch import dispatch_agent, read_scan_model_policy
 from .fingerprint import NON_GIT_SENTINEL, compute_codespace_fingerprint
-from taskrouter import agent_for
+from containers import Services
 
 def run_codemap_build(
     *,
@@ -105,7 +102,7 @@ def run_codemap_build(
         project_mode_path=_paths.project_mode_txt(),
         project_mode_signal=_paths.project_mode_json(),
     )
-    violations = validate_dynamic_content(prompt)
+    violations = Services.prompt_guard().validate_dynamic(prompt)
     if violations:
         log_phase_failure(
             "quick-codemap",
@@ -120,7 +117,7 @@ def run_codemap_build(
         model=model_policy["codemap_build"],
         project=codespace,
         prompt_file=prompt_file,
-        agent_file=agent_for("scan.codemap_build"),
+        agent_file=Services.task_router().agent_for("scan.codemap_build"),
         stdout_file=codemap_path,
         stderr_file=stderr_file,
     )
@@ -217,7 +214,7 @@ def _run_freshness_check(
         freshness_signal=freshness_signal,
         corrections_ref=corrections_ref,
     )
-    violations = validate_dynamic_content(prompt)
+    violations = Services.prompt_guard().validate_dynamic(prompt)
     if violations:
         print(
             f"[CODEMAP] Freshness prompt blocked — safety violations: "
@@ -230,19 +227,19 @@ def _run_freshness_check(
         model=model_policy["codemap_freshness"],
         project=codespace,
         prompt_file=freshness_prompt,
-        agent_file=agent_for("scan.codemap_freshness"),
+        agent_file=Services.task_router().agent_for("scan.codemap_freshness"),
         stdout_file=freshness_output,
     )
 
     if result.returncode == 0 and freshness_signal.is_file():
-        data = read_json(freshness_signal)
+        data = Services.artifact_io().read_json(freshness_signal)
         if not isinstance(data, dict):
             print(
                 f"[CODEMAP][WARN] Malformed freshness signal at "
                 f"{freshness_signal} "
                 f"— renaming to .malformed.json")
             if data is not None:
-                rename_malformed(freshness_signal)
+                Services.artifact_io().rename_malformed(freshness_signal)
             rebuild = True
         else:
             rebuild = data.get("rebuild", True)
@@ -283,7 +280,7 @@ def _run_verification(
         codemap_path=codemap_path,
         corrections_signal=corrections_signal,
     )
-    violations = validate_dynamic_content(prompt)
+    violations = Services.prompt_guard().validate_dynamic(prompt)
     if violations:
         print(
             f"[CODEMAP] Verify prompt blocked — safety violations: "
@@ -296,7 +293,7 @@ def _run_verification(
         model=model_policy["validation"],
         project=codespace,
         prompt_file=verifier_prompt,
-        agent_file=agent_for("scan.codemap_verify"),
+        agent_file=Services.task_router().agent_for("scan.codemap_verify"),
         stdout_file=verifier_output,
     )
 
