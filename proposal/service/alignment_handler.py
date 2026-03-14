@@ -11,6 +11,8 @@ from pathlib import Path
 from containers import Services
 from orchestrator.path_registry import PathRegistry
 from dispatch.prompt.writers import write_integration_alignment_prompt
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from proposal.service.cycle_control import handle_pause_response
 
 
 def run_alignment_check(
@@ -18,12 +20,12 @@ def run_alignment_check(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
 ) -> tuple[str, Path] | None:
     """Dispatch the alignment judge and return (result, output_path).
 
     Returns None if the caller should abort (ALIGNMENT_CHANGED_PENDING).
     """
+    paths = PathRegistry(planspace)
     policy = Services.policies().load(planspace)
     section_number = section.number
     artifacts = paths.artifacts
@@ -56,7 +58,7 @@ def run_alignment_check(
         section_number=section_number,
         agent_file=alignment_agent_file,
     )
-    if align_result == "ALIGNMENT_CHANGED_PENDING":
+    if align_result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     return align_result, align_output
@@ -66,10 +68,6 @@ def handle_alignment_signals(
     section_number: str,
     planspace: Path,
     parent: str,
-    codespace: Path,
-    align_result: str,
-    align_output: Path,
-    paths: PathRegistry,
 ) -> str | None:
     """Check alignment-judge signals for underspec.
 
@@ -78,13 +76,9 @@ def handle_alignment_signals(
         "abort" — caller should return None
         None — no underspec signal, proceed normally
     """
+    paths = PathRegistry(planspace)
     signal, detail = Services.dispatch_helpers().check_agent_signals(
-        align_result,
         signal_path=paths.signals_dir() / f"proposal-align-{section_number}-signal.json",
-        output_path=align_output,
-        planspace=planspace,
-        parent=parent,
-        codespace=codespace,
     )
     if signal != "underspec":
         return None
@@ -94,11 +88,4 @@ def handle_alignment_signals(
         parent,
         f"pause:underspec:{section_number}:{detail}",
     )
-    if not response.startswith("resume"):
-        return "abort"
-    payload = response.partition(":")[2].strip()
-    if payload:
-        Services.cross_section().persist_decision(planspace, section_number, payload)
-    if Services.pipeline_control().alignment_changed_pending(planspace):
-        return "abort"
-    return "continue"
+    return handle_pause_response(planspace, section_number, response)

@@ -14,7 +14,8 @@ from flow.repository.flow_context_store import (
     write_flow_context,
 )
 from flow.service.task_db_client import task_db
-from flow.types.routing import submit_task
+from flow.types.context import FlowEnvelope, FlowTask
+from flow.types.routing import Task, submit_task
 from flow.types.schema import BranchSpec, GateSpec, TaskSpec
 from containers import Services
 
@@ -47,24 +48,18 @@ def _freshness_from_steps(steps: list[TaskSpec], planspace: Path) -> str | None:
 
 
 def submit_chain(
-    db_path: Path,
-    submitted_by: str,
+    env: FlowEnvelope,
     steps: list[TaskSpec],
     *,
-    flow_id: str | None = None,
     chain_id: str | None = None,
-    declared_by_task_id: int | None = None,
-    origin_refs: list[str] | None = None,
-    planspace: Path | None = None,
-    freshness_token: str | None = None,
 ) -> list[int]:
     """Submit a linear chain of tasks."""
     if not steps:
         return []
 
-    flow_id = flow_id or new_flow_id()
+    flow_id = env.flow_id or new_flow_id()
     chain_id = chain_id or new_chain_id()
-    refs = origin_refs or []
+    refs = list(env.origin_refs)
 
     task_ids: list[int] = []
     previous_task_id: int | None = None
@@ -73,29 +68,23 @@ def submit_chain(
         instance_id = new_instance_id()
         depends_on = previous_task_id
         tid = submit_task(
-            db_path,
-            submitted_by,
-            step.task_type,
-            problem_id=step.problem_id or None,
-            concern_scope=step.concern_scope or None,
-            payload_path=step.payload_path or None,
-            priority=step.priority,
-            depends_on=depends_on,
-            instance_id=instance_id,
-            flow_id=flow_id,
-            chain_id=chain_id,
-            declared_by_task_id=declared_by_task_id,
-            flow_context_path=None,
-            continuation_path=None,
-            result_manifest_path=None,
-            freshness_token=freshness_token,
+            env.db_path,
+            Task.from_spec(
+                step, env.submitted_by,
+                depends_on=depends_on,
+                instance_id=instance_id,
+                flow_id=flow_id,
+                chain_id=chain_id,
+                declared_by_task_id=env.declared_by_task_id,
+                freshness_token=env.freshness_token,
+            ),
         )
 
         ctx_path = flow_context_relpath(tid)
         cont_path = continuation_relpath(tid)
         res_path = result_manifest_relpath(tid)
 
-        with task_db(db_path) as conn:
+        with task_db(env.db_path) as conn:
             conn.execute(
                 """UPDATE tasks
                    SET flow_context_path=?, continuation_path=?,
@@ -105,17 +94,19 @@ def submit_chain(
             )
             conn.commit()
 
-        if planspace is not None:
+        if env.planspace is not None:
             write_flow_context(
-                planspace=planspace,
-                task_id=tid,
-                instance_id=instance_id,
-                flow_id=flow_id,
-                chain_id=chain_id,
-                task_type=step.task_type,
-                declared_by_task_id=declared_by_task_id,
-                depends_on=depends_on,
-                trigger_gate_id=None,
+                planspace=env.planspace,
+                task=FlowTask(
+                    task_id=tid,
+                    instance_id=instance_id,
+                    flow_id=flow_id,
+                    chain_id=chain_id,
+                    task_type=step.task_type,
+                    declared_by_task_id=env.declared_by_task_id,
+                    depends_on=depends_on,
+                    trigger_gate_id=None,
+                ),
                 origin_refs=refs,
                 previous_task_id=previous_task_id,
             )
@@ -166,22 +157,18 @@ def _insert_gate_record(
 
 
 def submit_fanout(
-    db_path: Path,
-    submitted_by: str,
+    env: FlowEnvelope,
     branches: list[BranchSpec],
     *,
-    flow_id: str,
-    declared_by_task_id: int | None = None,
-    origin_refs: list[str] | None = None,
     gate: GateSpec | None = None,
-    planspace: Path | None = None,
-    freshness_token: str | None = None,
 ) -> str | None:
     """Submit parallel branches, optionally under a gate."""
     if not branches:
         return None
 
-    refs = origin_refs or []
+    from dataclasses import replace as _replace
+
+    flow_id = env.flow_id or new_flow_id()
     gate_id: str | None = None
     if gate is not None:
         gate_id = new_gate_id()
@@ -192,24 +179,19 @@ def submit_fanout(
         child_chain_id = new_chain_id()
 
         if branch.chain_ref:
-            steps = resolve_chain_ref(branch.chain_ref, branch.args, refs)
+            steps = resolve_chain_ref(branch.chain_ref, branch.args, list(env.origin_refs))
         else:
             steps = branch.steps
 
-        branch_freshness = freshness_token
-        if branch_freshness is None and planspace is not None:
-            branch_freshness = _freshness_from_steps(steps, planspace)
+        branch_freshness = env.freshness_token
+        if branch_freshness is None and env.planspace is not None:
+            branch_freshness = _freshness_from_steps(steps, env.planspace)
 
+        branch_env = _replace(env, flow_id=flow_id, freshness_token=branch_freshness)
         task_ids = submit_chain(
-            db_path,
-            submitted_by,
+            branch_env,
             steps,
-            flow_id=flow_id,
             chain_id=child_chain_id,
-            declared_by_task_id=declared_by_task_id,
-            origin_refs=refs,
-            planspace=planspace,
-            freshness_token=branch_freshness,
         )
 
         if task_ids:
@@ -217,7 +199,7 @@ def submit_fanout(
 
     if gate_id is not None and branch_info:
         _insert_gate_record(
-            db_path, gate_id, flow_id, declared_by_task_id,
+            env.db_path, gate_id, flow_id, env.declared_by_task_id,
             gate, branch_info,
         )
 

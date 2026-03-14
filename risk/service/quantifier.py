@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from pathlib import Path
-from typing import Any
-
-from containers import Services
 from risk.types import (
     AssessmentClass,
     DecisionClass,
@@ -220,17 +215,6 @@ DEFAULT_CLASS_THRESHOLDS: dict[AssessmentClass, int] = {
     DecisionClass.IRREVERSIBLE: 20,
 }
 
-DEFAULT_RISK_PARAMETERS: dict[str, Any] = {
-    "posture_bands": [
-        {"min": lower, "max": upper, "posture": posture.value}
-        for lower, upper, posture in DEFAULT_POSTURE_BANDS
-    ],
-    "class_thresholds": {
-        assessment_class.value: threshold
-        for assessment_class, threshold in DEFAULT_CLASS_THRESHOLDS.items()
-    },
-}
-
 MAX_SEVERITY = 4
 RISK_MIN = 0
 RISK_MAX = 100
@@ -285,31 +269,6 @@ def is_acceptable(raw_risk: int, assessment_class: AssessmentClass) -> bool:
     """Return whether the step can execute under default ROAL thresholds."""
     threshold = DEFAULT_CLASS_THRESHOLDS[assessment_class]
     return clamp_int(raw_risk, RISK_MIN, RISK_MAX) <= threshold
-
-
-def load_risk_parameters(path: Path) -> dict[str, Any]:
-    """Load optional risk parameter overrides from disk."""
-    defaults = deepcopy(DEFAULT_RISK_PARAMETERS)
-    payload = Services.artifact_io().read_json(path)
-    if not isinstance(payload, dict):
-        return defaults
-
-    posture_bands = payload.get("posture_bands")
-    if isinstance(posture_bands, list):
-        defaults["posture_bands"] = posture_bands
-
-    thresholds = payload.get("class_thresholds")
-    if not isinstance(thresholds, dict):
-        thresholds = payload.get("execution_thresholds")
-    if isinstance(thresholds, dict):
-        defaults["class_thresholds"].update(
-            {
-                str(key): value
-                for key, value in thresholds.items()
-                if isinstance(value, int)
-            }
-        )
-    return defaults
 
 
 def _modifier_adjustment(modifiers: RiskModifiers) -> float:

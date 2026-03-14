@@ -8,7 +8,9 @@ from orchestrator.path_registry import PathRegistry
 from pipeline.template import render_template
 from containers import Services
 from staleness.helpers.verdict_parsers import parse_alignment_verdict as _parse_alignment_verdict
-from orchestrator.types import Section
+from orchestrator.types import Section, ControlSignal
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from signals.types import ALIGNMENT_INVALID_FRAME
 
 
 def collect_modified_files(
@@ -57,7 +59,7 @@ Reply with a JSON block:
 def _parse_adjudicator_response(adj_result: str) -> str | None:
     """Parse the adjudicator's JSON response. Returns problems or None if aligned."""
     import json as _json
-    if not adj_result or adj_result == "ALIGNMENT_CHANGED_PENDING":
+    if not adj_result or adj_result == ALIGNMENT_CHANGED_PENDING:
         return None
     try:
         json_start = adj_result.find("{")
@@ -127,12 +129,10 @@ def _extract_problems(
 
 def _run_alignment_check_with_retries(
     section: Section, planspace: Path, codespace: Path, parent: str,
-    sec_num: str,
     output_prefix: str = "align",
     max_retries: int = 2,
     *,
     model: str,
-    adjudicator_model: str,
 ) -> str | None:
     """Run an alignment check with TIMEOUT retry logic.
 
@@ -142,12 +142,13 @@ def _run_alignment_check_with_retries(
     """
     from dispatch.prompt.writers import write_impl_alignment_prompt
 
+    sec_num = section.number
     paths = PathRegistry(planspace)
     for attempt in range(1, max_retries + 2):  # 1 initial + max_retries
         ctrl = Services.pipeline_control().poll_control_messages(
             planspace, parent, current_section=sec_num)
-        if ctrl == "alignment_changed":
-            return "ALIGNMENT_CHANGED_PENDING"
+        if ctrl == ControlSignal.ALIGNMENT_CHANGED:
+            return ALIGNMENT_CHANGED_PENDING
         align_prompt = write_impl_alignment_prompt(
             section, planspace, codespace,
         )
@@ -158,7 +159,7 @@ def _run_alignment_check_with_retries(
             section_number=sec_num,
             agent_file=Services.task_router().agent_for("staleness.alignment_check"),
         )
-        if result == "ALIGNMENT_CHANGED_PENDING":
+        if result == ALIGNMENT_CHANGED_PENDING:
             return result
         if not result.startswith("TIMEOUT:"):
             # Check for structured JSON verdict from alignment judge
@@ -171,7 +172,7 @@ def _run_alignment_check_with_retries(
                 Services.logger().log(f"  alignment judge reported invalid frame for "
                     f"section {sec_num} — structural failure, "
                     f"requires parent intervention")
-                return "INVALID_FRAME"
+                return ALIGNMENT_INVALID_FRAME
             return result
         Services.logger().log(f"  alignment check for section {sec_num} timed out "
             f"(attempt {attempt}/{max_retries + 1})")

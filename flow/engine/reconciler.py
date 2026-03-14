@@ -16,6 +16,7 @@ from flow.engine.flow_submitter import (
     submit_chain,
     submit_fanout,
 )
+from flow.types.context import FlowEnvelope
 from flow.types.schema import ChainAction, FanoutAction, parse_flow_signal
 from research.engine.orchestrator import (
     load_research_status,
@@ -39,6 +40,7 @@ from flow.repository.gate_repository import (
     update_gate_member,
     update_gate_member_leaf,
 )
+from signals.types import SIGNAL_NEEDS_PARENT
 
 logger = logging.getLogger(__name__)
 
@@ -131,17 +133,20 @@ def _process_continuation_actions(
     planspace: Path,
 ) -> None:
     """Submit chain/fanout actions from a continuation signal."""
+    env = FlowEnvelope(
+        db_path=db_path,
+        submitted_by="reconciler",
+        flow_id=flow_id,
+        declared_by_task_id=task_id,
+        origin_refs=origin_refs,
+        planspace=planspace,
+    )
     for action in continuation.actions:
         if isinstance(action, ChainAction) and action.steps:
             new_ids = submit_chain(
-                db_path,
-                "reconciler",
+                env,
                 action.steps,
-                flow_id=flow_id,
                 chain_id=chain_id,
-                declared_by_task_id=task_id,
-                origin_refs=origin_refs,
-                planspace=planspace,
             )
             if new_ids:
                 with task_db(db_path) as conn:
@@ -156,14 +161,9 @@ def _process_continuation_actions(
 
         elif isinstance(action, FanoutAction) and action.branches:
             submit_fanout(
-                db_path,
-                "reconciler",
+                env,
                 action.branches,
-                flow_id=flow_id,
-                declared_by_task_id=task_id,
-                origin_refs=origin_refs,
                 gate=action.gate,
-                planspace=planspace,
             )
 
 
@@ -235,7 +235,7 @@ def reconcile_task_completion(
     _handle_research_completion(
         db_path, planspace, task, status, output_path, error, origin_refs, codespace,
     )
-    _handle_post_impl_assessment_completion(task, status, planspace, codespace)
+    _handle_post_impl_assessment_completion(task, status, planspace)
 
     if status == "failed":
         if chain_id:
@@ -384,10 +384,8 @@ def _handle_post_impl_assessment_completion(
     task: dict,
     status: str,
     planspace: Path,
-    codespace: Path | None,
 ) -> None:
     """Apply post-implementation assessment results on task completion."""
-    del codespace
 
     task_type = str(task.get("task_type") or "")
     if task_type != "implementation.post_assessment" or status != "complete":
@@ -444,7 +442,7 @@ def _emit_refactor_blocker(
         or "post-implementation assessment requires a refactor pass"
     )
     payload = {
-        "state": "needs_parent",
+        "state": SIGNAL_NEEDS_PARENT,
         "blocker_type": "post_impl_refactor_required",
         "source": "post_impl_assessment",
         "section": section_number,

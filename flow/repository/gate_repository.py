@@ -21,7 +21,8 @@ from flow.repository.flow_context_store import (
     write_flow_context,
 )
 from flow.engine.flow_submitter import new_chain_id, new_instance_id
-from flow.types.routing import submit_task
+from flow.types.context import FlowTask
+from flow.types.routing import Task, submit_task
 
 
 def read_origin_refs(planspace: Path, task_id: int) -> list[str]:
@@ -127,19 +128,20 @@ def _fire_synthesis_task(
 
     syn_tid = submit_task(
         db_path,
-        "reconciler",
-        gate["synthesis_task_type"],
-        problem_id=gate["synthesis_problem_id"],
-        concern_scope=gate["synthesis_concern_scope"],
-        payload_path=gate["synthesis_payload_path"],
-        priority=gate["synthesis_priority"] or "normal",
-        instance_id=syn_instance_id,
-        flow_id=flow_id,
-        chain_id=syn_chain_id,
-        declared_by_task_id=None,
-        trigger_gate_id=gate_id,
-        flow_context_path=agg_relpath,
-        result_manifest_path=result_manifest_relpath(0),
+        Task(
+            task_type=gate["synthesis_task_type"],
+            submitted_by="reconciler",
+            problem_id=gate["synthesis_problem_id"],
+            concern_scope=gate["synthesis_concern_scope"],
+            payload_path=gate["synthesis_payload_path"],
+            priority=gate["synthesis_priority"] or "normal",
+            instance_id=syn_instance_id,
+            flow_id=flow_id,
+            chain_id=syn_chain_id,
+            trigger_gate_id=gate_id,
+            flow_context_path=agg_relpath,
+            result_manifest_path=result_manifest_relpath(0),
+        ),
     )
 
     syn_ctx_path = flow_context_relpath(syn_tid)
@@ -164,14 +166,16 @@ def _fire_synthesis_task(
 
     write_flow_context(
         planspace=planspace,
-        task_id=syn_tid,
-        instance_id=syn_instance_id,
-        flow_id=flow_id,
-        chain_id=syn_chain_id,
-        task_type=gate["synthesis_task_type"],
-        declared_by_task_id=None,
-        depends_on=None,
-        trigger_gate_id=gate_id,
+        task=FlowTask(
+            task_id=syn_tid,
+            instance_id=syn_instance_id,
+            flow_id=flow_id,
+            chain_id=syn_chain_id,
+            task_type=gate["synthesis_task_type"],
+            declared_by_task_id=None,
+            depends_on=None,
+            trigger_gate_id=gate_id,
+        ),
         origin_refs=origin_refs,
         previous_task_id=None,
     )

@@ -9,7 +9,11 @@ from dispatch.prompt.writers import write_impl_alignment_prompt, write_strategic
 from implementation.service.traceability_writer import _write_traceability_index
 from implementation.service.change_verifier import verify_changed_files
 from implementation.service.trace_map_builder import build_trace_map
+from flow.types.context import FlowEnvelope
 from flow.types.schema import TaskSpec
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from proposal.service.cycle_control import check_early_abort
+from signals.types import TRUNCATE_DETAIL
 
 
 # ---------------------------------------------------------------------------
@@ -29,9 +33,7 @@ def run_implementation_loop(
     cycle_budget: dict,
 ) -> list[str] | None:
     """Run strategic implementation until aligned, then return changed files."""
-    paths = PathRegistry(planspace)
-    artifacts = paths.artifacts
-    cycle_budget_path = paths.cycle_budget(section.number)
+    cycle_budget_path = PathRegistry(planspace).cycle_budget(section.number)
 
     all_known_paths = list(section.related_files)
     pre_hashes = Services.staleness().snapshot_files(codespace, all_known_paths)
@@ -40,13 +42,13 @@ def run_implementation_loop(
     impl_attempt = 0
 
     while True:
-        if _should_abort(planspace, parent, section.number):
+        if check_early_abort(section.number, planspace, parent):
             return None
 
         impl_attempt += 1
 
         budget_action = _check_budget(
-            impl_attempt, cycle_budget, paths, planspace, parent,
+            impl_attempt, cycle_budget, planspace, parent,
             section.number, cycle_budget_path,
         )
         if budget_action == _ABORT:
@@ -55,15 +57,14 @@ def run_implementation_loop(
         _log_attempt(section.number, impl_attempt, impl_problems)
 
         impl_result = _dispatch_implementation(
-            section, planspace, codespace, parent, paths, artifacts,
+            section, planspace, codespace, parent,
             impl_problems,
         )
         if impl_result is None:
             return None
 
         dispatch_action = _handle_post_dispatch(
-            impl_result, section.number, planspace, parent, paths, artifacts,
-            codespace,
+            section.number, planspace, parent,
         )
         if dispatch_action == _ABORT:
             return None
@@ -71,7 +72,7 @@ def run_implementation_loop(
             continue
 
         align_result = _dispatch_alignment_check(
-            section, planspace, codespace, parent, artifacts,
+            section, planspace, codespace, parent,
         )
         if align_result is None:
             return None
@@ -85,12 +86,10 @@ def run_implementation_loop(
 
         problems = _extract_alignment_problems(
             align_result, section.number, planspace, parent, codespace,
-            artifacts,
         )
 
         underspec_action = _handle_underspec_signal(
-            align_result, section.number, planspace, parent, codespace,
-            artifacts,
+            section.number, planspace, parent,
         )
         if underspec_action == _ABORT:
             return None
@@ -121,23 +120,6 @@ def run_implementation_loop(
 # ---------------------------------------------------------------------------
 
 
-def _should_abort(
-    planspace: Path, parent: str, section_number: str,
-) -> bool:
-    """Return True if a pending message or alignment change requires abort."""
-    if Services.pipeline_control().handle_pending_messages(planspace, [], set()):
-        Services.communicator().mailbox_send(planspace, parent, f"fail:{section_number}:aborted")
-        return True
-
-    if Services.pipeline_control().alignment_changed_pending(planspace):
-        Services.logger().log(
-            f"Section {section_number}: alignment changed — "
-            "aborting section to restart Phase 1"
-        )
-        return True
-
-    return False
-
 
 # ---------------------------------------------------------------------------
 # Budget enforcement
@@ -147,7 +129,6 @@ def _should_abort(
 def _check_budget(
     impl_attempt: int,
     cycle_budget: dict,
-    paths: PathRegistry,
     planspace: Path,
     parent: str,
     section_number: str,
@@ -161,6 +142,7 @@ def _check_budget(
     if impl_attempt <= cycle_budget["implementation_max"]:
         return _PROCEED
 
+    paths = PathRegistry(planspace)
     Services.logger().log(
         f"Section {section_number}: implementation cycle budget "
         f"exhausted ({cycle_budget['implementation_max']} attempts)"
@@ -217,7 +199,7 @@ def _log_alignment_problems(
     parent: str,
 ) -> None:
     """Log and notify parent about alignment problems found."""
-    short = problems[:200]
+    short = problems[:TRUNCATE_DETAIL]
     Services.logger().log(
         f"Section {section_number}: implementation problems "
         f"(attempt {impl_attempt}): {short}"
@@ -239,8 +221,6 @@ def _dispatch_implementation(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
-    artifacts: Path,
     impl_problems: str | None,
 ) -> str | None:
     """Write the implementation prompt, dispatch to the agent, return result.
@@ -248,6 +228,7 @@ def _dispatch_implementation(
     Returns ``None`` when the caller should ``return None`` (prompt
     blocked, alignment changed, or timeout).
     """
+    artifacts = PathRegistry(planspace).artifacts
     policy = Services.policies().load(planspace)
     impl_prompt = write_strategic_impl_prompt(
         section,
@@ -275,7 +256,7 @@ def _dispatch_implementation(
         section_number=section.number,
         agent_file=Services.task_router().agent_for("implementation.strategic"),
     )
-    if impl_result == "ALIGNMENT_CHANGED_PENDING":
+    if impl_result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     Services.communicator().mailbox_send(
@@ -302,21 +283,18 @@ def _dispatch_implementation(
 
 
 def _handle_post_dispatch(
-    impl_result: str,
     section_number: str,
     planspace: Path,
     parent: str,
-    paths: PathRegistry,
-    artifacts: Path,
-    codespace: Path,
 ) -> str:
     """Ingest tasks and check agent signals after implementation dispatch.
 
     Returns ``_ABORT``, ``_CONTINUE``, or ``_PROCEED``.
     """
+    paths = PathRegistry(planspace)
+    artifacts = paths.artifacts
     Services.flow_ingestion().ingest_and_submit(
         planspace,
-        db_path=paths.run_db(),
         submitted_by=f"implementation-{section_number}",
         signal_path=paths.task_request_signal("impl", section_number),
         origin_refs=[str(artifacts / f"impl-{section_number}-output.md")],
@@ -324,12 +302,7 @@ def _handle_post_dispatch(
 
     paths.signals_dir().mkdir(parents=True, exist_ok=True)
     signal, detail = Services.dispatch_helpers().check_agent_signals(
-        impl_result,
         signal_path=paths.impl_signal(section_number),
-        output_path=artifacts / f"impl-{section_number}-output.md",
-        planspace=planspace,
-        parent=parent,
-        codespace=codespace,
     )
     if signal:
         return _handle_signal_pause(
@@ -371,9 +344,9 @@ def _dispatch_alignment_check(
     planspace: Path,
     codespace: Path,
     parent: str,
-    artifacts: Path,
 ) -> str | None:
     """Dispatch the alignment check agent. Return result or None to abort."""
+    artifacts = PathRegistry(planspace).artifacts
     policy = Services.policies().load(planspace)
     Services.logger().log(f"Section {section.number}: implementation alignment check")
     impl_align_prompt = write_impl_alignment_prompt(
@@ -392,7 +365,7 @@ def _dispatch_alignment_check(
         section_number=section.number,
         agent_file=Services.task_router().agent_for("staleness.alignment_check"),
     )
-    if impl_align_result == "ALIGNMENT_CHANGED_PENDING":
+    if impl_align_result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     return impl_align_result
@@ -417,9 +390,9 @@ def _extract_alignment_problems(
     planspace: Path,
     parent: str,
     codespace: Path,
-    artifacts: Path,
 ) -> str | None:
     """Extract alignment problems from the alignment check result."""
+    artifacts = PathRegistry(planspace).artifacts
     policy = Services.policies().load(planspace)
     impl_align_output = artifacts / f"impl-align-{section_number}-output.md"
     return Services.section_alignment().extract_problems(
@@ -433,23 +406,14 @@ def _extract_alignment_problems(
 
 
 def _handle_underspec_signal(
-    impl_align_result: str,
     section_number: str,
     planspace: Path,
     parent: str,
-    codespace: Path,
-    artifacts: Path,
 ) -> str:
     """Check for underspec signal after alignment; return loop action."""
     paths = PathRegistry(planspace)
-    impl_align_output = artifacts / f"impl-align-{section_number}-output.md"
     signal, detail = Services.dispatch_helpers().check_agent_signals(
-        impl_align_result,
         signal_path=paths.signals_dir() / f"impl-align-{section_number}-signal.json",
-        output_path=impl_align_output,
-        planspace=planspace,
-        parent=parent,
-        codespace=codespace,
     )
     if signal == "underspec":
         return _handle_signal_pause(
@@ -483,13 +447,13 @@ def _finalize(
             "implementation change",
         )
 
-    _write_traceability_index(planspace, section, codespace, actually_changed)
+    _write_traceability_index(planspace, section, actually_changed)
 
     build_trace_map(
         planspace, codespace, section.number,
         actually_changed, list(section.related_files),
     )
-    _dispatch_post_impl_assessment(section.number, planspace, codespace)
+    _dispatch_post_impl_assessment(section.number, planspace)
 
     return actually_changed
 
@@ -497,14 +461,12 @@ def _finalize(
 def _dispatch_post_impl_assessment(
     section_number: str,
     planspace: Path,
-    codespace: Path,
 ) -> None:
     """Queue a post-implementation governance assessment for a section."""
     paths = PathRegistry(planspace)
     prompt_path = write_post_impl_assessment_prompt(
         section_number,
         planspace,
-        codespace,
     )
     if prompt_path is None:
         Services.logger().log(
@@ -514,8 +476,16 @@ def _dispatch_post_impl_assessment(
         return
 
     Services.flow_ingestion().submit_chain(
-        paths.run_db(),
-        f"post-impl-{section_number}",
+        FlowEnvelope(
+            db_path=paths.run_db(),
+            submitted_by=f"post-impl-{section_number}",
+            origin_refs=[
+                str(paths.trace_dir() / f"section-{section_number}.json"),
+                str(paths.trace_map(section_number)),
+                str(paths.proposal(section_number)),
+            ],
+            planspace=planspace,
+        ),
         [
             TaskSpec(
                 task_type="implementation.post_assessment",
@@ -524,10 +494,4 @@ def _dispatch_post_impl_assessment(
                 problem_id=f"post-impl-{section_number}",
             )
         ],
-        origin_refs=[
-            str(paths.trace_dir() / f"section-{section_number}.json"),
-            str(paths.trace_map(section_number)),
-            str(paths.proposal(section_number)),
-        ],
-        planspace=planspace,
     )

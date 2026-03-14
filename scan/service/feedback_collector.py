@@ -16,8 +16,10 @@ from scan.service.feedback_router import (
 from scan.related.related_file_resolver import apply_related_files_update
 from scan.service.template_loader import load_scan_template
 
+from scan.scan_context import ScanContext
 from scan.scan_dispatcher import dispatch_agent, read_scan_model_policy
 from containers import Services
+from signals.types import SIGNAL_OUT_OF_SCOPE
 
 
 def _collect_section_scan_feedback(
@@ -57,7 +59,7 @@ def _collect_section_scan_feedback(
             if isinstance(mf, str) and mf.strip():
                 missing_files.append(f"- {mf.strip()}")
 
-        for oos in data.get("out_of_scope", []):
+        for oos in data.get(SIGNAL_OUT_OF_SCOPE, []):
             if isinstance(oos, str) and oos.strip():
                 out_of_scope_items.append(f"- {oos.strip()}")
 
@@ -201,7 +203,6 @@ def _build_updater_prompt(
     truly_missing: list[str],
     truly_irrelevant: list[str],
     updater_signal: Path,
-    _paths: PathRegistry,
 ) -> str | None:
     """Build the related-files updater prompt text.
 
@@ -247,21 +248,18 @@ def _build_updater_prompt(
 
 def _dispatch_updater_and_apply(
     sec_name: str,
-    codespace: Path,
+    ctx: ScanContext,
     updater_prompt_path: Path,
     updater_output: Path,
     updater_signal: Path,
     section_file: Path,
-    model_policy: dict[str, str],
-    scan_log_dir: Path,
-    _paths: PathRegistry,
 ) -> None:
     """Dispatch updater agent, escalate on failure, and apply the signal."""
-    updater_model = model_policy["feedback_updater"]
-    escalation_model = model_policy["exploration"]
+    updater_model = ctx.model_policy["feedback_updater"]
+    escalation_model = ctx.model_policy["exploration"]
     result = dispatch_agent(
         model=updater_model,
-        project=codespace,
+        project=ctx.codespace,
         prompt_file=updater_prompt_path,
         agent_file=Services.task_router().agent_for("scan.adjudicate"),
         stdout_file=updater_output,
@@ -280,7 +278,7 @@ def _dispatch_updater_and_apply(
         )
         result = dispatch_agent(
             model=escalation_model,
-            project=codespace,
+            project=ctx.codespace,
             prompt_file=updater_prompt_path,
             agent_file=Services.task_router().agent_for("scan.adjudicate"),
             stdout_file=updater_output,
@@ -294,7 +292,7 @@ def _dispatch_updater_and_apply(
     if not valid_signal:
         if result.returncode != 0:
             _append_to_log(
-                scan_log_dir / "failures.log",
+                ctx.scan_log_dir / "failures.log",
                 f"- Updater failed for {sec_name} (no valid signal "
                 "after escalation)",
             )
@@ -339,12 +337,18 @@ def _apply_feedback(
     print("--- Deep Scan: applying feedback (missing + irrelevant files) ---")
 
     _paths = PathRegistry(artifacts_dir.parent)
-    corrections_path = _paths.corrections()
+    ctx = ScanContext.from_artifacts(
+        codespace=codespace,
+        codemap_path=codemap_path,
+        artifacts_dir=artifacts_dir,
+        scan_log_dir=scan_log_dir,
+        model_policy=model_policy,
+    )
     corrections_ref = ""
-    if corrections_path.is_file():
+    if ctx.corrections_path.is_file():
         corrections_ref = (
             f"\n3. Codemap corrections (authoritative fixes): "
-            f"`{corrections_path}`"
+            f"`{ctx.corrections_path}`"
         )
 
     for section_file in section_files:
@@ -378,7 +382,7 @@ def _apply_feedback(
         updater_signal = _paths.scan_related_files_update_signal(sec_name)
         prompt = _build_updater_prompt(
             sec_name, section_file, codemap_path, corrections_ref,
-            truly_missing, truly_irrelevant, updater_signal, _paths,
+            truly_missing, truly_irrelevant, updater_signal,
         )
         if prompt is None:
             continue
@@ -388,7 +392,6 @@ def _apply_feedback(
         updater_output = sec_log_dir / "related-files-updater-output.md"
 
         _dispatch_updater_and_apply(
-            sec_name, codespace, updater_prompt_path, updater_output,
-            updater_signal, section_file, model_policy, scan_log_dir,
-            _paths,
+            sec_name, ctx, updater_prompt_path, updater_output,
+            updater_signal, section_file,
         )

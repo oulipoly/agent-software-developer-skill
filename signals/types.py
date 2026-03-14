@@ -1,4 +1,4 @@
-"""Pydantic models for structured agent signals."""
+"""Pydantic models and constants for structured agent signals."""
 
 from __future__ import annotations
 
@@ -7,6 +7,37 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
+
+# ── signal / blocking state constants ────────────────────────────────
+
+SIGNAL_NEEDS_PARENT = "needs_parent"
+SIGNAL_NEED_DECISION = "need_decision"
+SIGNAL_OUT_OF_SCOPE = "out_of_scope"
+BLOCKING_NEEDS_PARENT = "NEEDS_PARENT"
+BLOCKING_NEED_DECISION = "NEED_DECISION"
+
+# ── action decision constants (triage / proposal control flow) ───────
+
+ACTION_CONTINUE = "continue"
+ACTION_ABORT = "abort"
+ACTION_SKIP = "skip"
+
+# ── alignment result constants ───────────────────────────────────────
+
+ALIGNMENT_INVALID_FRAME = "INVALID_FRAME"
+
+# ── pass mode constants (section pipeline) ───────────────────────────
+
+PASS_MODE_PROPOSAL = "proposal"
+PASS_MODE_IMPLEMENTATION = "implementation"
+
+# ── display truncation limits ────────────────────────────────────────
+
+TRUNCATE_DETAIL = 200       # problem descriptions, event details, decision records
+TRUNCATE_SUMMARY = 80       # mailbox previews, blocker one-liners
+TRUNCATE_MEDIUM = 120       # coordination result summaries
+TRUNCATE_REASON = 150       # scope-delta reason strings
+TRUNCATE_TOKEN = 8          # hash / freshness-token previews
 
 
 class AgentSignal(BaseModel):

@@ -23,6 +23,8 @@ from containers import Services
 from implementation.service.section_reexplorer import _reexplore_section
 from implementation.engine.section_pipeline import run_section
 from orchestrator.types import ProposalPassResult, Section
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from signals.types import PASS_MODE_PROPOSAL, SIGNAL_NEEDS_PARENT
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ def _write_proposal_risk_blocker(
     Services.artifact_io().write_json(
         blocker_path,
         {
-            "state": "needs_parent",
+            "state": SIGNAL_NEEDS_PARENT,
             "blocker_type": "proposal_risk_advisory",
             "source": "roal",
             "section": sec_num,
@@ -177,7 +179,7 @@ def _write_advisory_artifacts(
             "produced_by": "proposal_pass",
         })
         high_risk = any(
-            severities.get(risk, 0) >= 3
+            severities.get(risk, 0) >= _RISK_SEVERITY_BLOCKER_THRESHOLD
             for risk in ("brute_force_regression", "silent_drift")
             if risk in dominant_risks
         )
@@ -276,7 +278,6 @@ def _proposal_needs_additional_exploration(assessment: object) -> bool:
 
 def _check_alignment_and_requeue(
     planspace: Path,
-    codespace: Path,
     completed: set[str],
     queue: list[str],
     sections_by_num: dict[str, Section],
@@ -292,7 +293,6 @@ def _check_alignment_and_requeue(
             queue,
             sections_by_num,
             planspace,
-            codespace,
             **kwargs,
         )
         return True
@@ -307,12 +307,12 @@ def _reexplore_missing_files(
     completed: set[str],
     queue: list[str],
     sections_by_num: dict[str, Section],
-    policy: dict[str, Any],
 ) -> bool:
     """Dispatch re-explorer when a section has no related files.
 
     Returns True if the caller should ``continue`` the loop iteration.
     """
+    policy = Services.policies().load(planspace)
     sec_num = section.number
     Services.logger().log(
         f"Section {sec_num}: no related files — dispatching "
@@ -325,10 +325,9 @@ def _reexplore_missing_files(
         parent,
         model=policy["setup"],
     )
-    if reexplore_result == "ALIGNMENT_CHANGED_PENDING":
+    if reexplore_result == ALIGNMENT_CHANGED_PENDING:
         _check_alignment_and_requeue(
             planspace,
-            codespace,
             completed,
             queue,
             sections_by_num,
@@ -405,20 +404,19 @@ def run_proposal_pass(
     parent: str,
 ) -> dict[str, ProposalPassResult]:
     """Run the proposal pass for all sections and return proposal results."""
-    policy = Services.policies().load(planspace)
     proposal_results: dict[str, ProposalPassResult] = {}
     queue = [section.number for section in all_sections]
     completed: set[str] = set()
 
     while queue:
-        if Services.pipeline_control().handle_pending_messages(planspace, queue, completed):
+        if Services.pipeline_control().handle_pending_messages(planspace):
             Services.logger().log("Aborted by parent")
             Services.communicator().mailbox_send(planspace, parent, "fail:aborted")
             raise ProposalPassExit
 
         if Services.pipeline_control().alignment_changed_pending(planspace):  # noqa: SIM102
             if _check_alignment_and_requeue(
-                planspace, codespace, completed, queue, sections_by_num,
+                planspace, completed, queue, sections_by_num,
             ):
                 continue
 
@@ -438,7 +436,7 @@ def run_proposal_pass(
         if not section.related_files:
             if _reexplore_missing_files(
                 section, planspace, codespace, parent,
-                completed, queue, sections_by_num, policy,
+                completed, queue, sections_by_num,
             ):
                 continue
 
@@ -448,11 +446,11 @@ def run_proposal_pass(
             section,
             parent,
             all_sections=all_sections,
-            pass_mode="proposal",
+            pass_mode=PASS_MODE_PROPOSAL,
         )
 
         if _check_alignment_and_requeue(
-            planspace, codespace, completed, queue, sections_by_num,
+            planspace, completed, queue, sections_by_num,
             current_section=sec_num,
         ):
             continue

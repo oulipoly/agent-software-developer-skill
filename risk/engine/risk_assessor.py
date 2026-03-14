@@ -14,6 +14,7 @@ from risk.repository.serialization import (
 )
 from risk.service.threshold import enforce_thresholds, load_default_parameters, validate_risk_plan
 from risk.types import (
+    MAX_RESIDUAL_RISK,
     PostureProfile,
     RiskAssessment,
     RiskHistoryEntry,
@@ -29,13 +30,16 @@ from risk.service.response_parser import parse_risk_assessment, parse_risk_plan
 from risk.service.posture_hysteresis import apply_posture_hysteresis, _history_signature
 from risk.service.fallback import fallback_plan, lightweight_fallback_plan
 
+_DEFAULT_RISK_ITERATIONS = 5
+_DEFAULT_HISTORY_ADJUSTMENT_BOUND = 10.0
+
 
 def run_risk_loop(
     planspace: Path,
     scope: str,
     layer: str,
     package: RiskPackage,
-    max_iterations: int = 5,
+    max_iterations: int = _DEFAULT_RISK_ITERATIONS,
     posture_floor: PostureProfile | str | None = None,
 ) -> RiskPlan:
     """Run the full ROAL loop for a package."""
@@ -48,7 +52,7 @@ def run_risk_loop(
 
     for iteration in range(1, max_iterations + 1):
         assessment = _validate_and_dispatch_assessment(
-            paths, planspace, scope, package,
+            planspace, scope, package,
         )
         if assessment is None:
             return _write_and_return_fallback(
@@ -62,7 +66,7 @@ def run_risk_loop(
         write_risk_artifact(paths.risk_assessment(scope), serialize_assessment(assessment))
 
         plan = _validate_and_dispatch_optimization(
-            paths, planspace, scope, package, parameters, assessment,
+            planspace, scope,
             retry_hint=(iteration > 1 and last_plan is not None),
         )
         if plan is None:
@@ -107,7 +111,7 @@ def run_lightweight_risk_check(
     write_package(paths, package)
 
     assessment = _validate_and_dispatch_assessment(
-        paths, planspace, scope, package, prefix="light",
+        planspace, scope, package, prefix="light",
     )
     if assessment is None:
         return _write_and_return_fallback(
@@ -122,7 +126,7 @@ def run_lightweight_risk_check(
     write_risk_artifact(paths.risk_assessment(scope), serialize_assessment(assessment))
 
     plan = _validate_and_dispatch_lightweight_optimization(
-        paths, planspace, scope, package, parameters, assessment,
+        planspace, scope,
     )
     if plan is None:
         return _write_and_return_lightweight_fallback(
@@ -153,7 +157,6 @@ def run_lightweight_risk_check(
 
 
 def _validate_and_dispatch_assessment(
-    paths: PathRegistry,
     planspace: Path,
     scope: str,
     package: RiskPackage,
@@ -165,6 +168,7 @@ def _validate_and_dispatch_assessment(
     Returns ``None`` when the prompt fails validation *or* the response cannot
     be parsed -- the caller decides what fallback to use.
     """
+    paths = PathRegistry(planspace)
     tag = f"{prefix}-" if prefix else ""
     prompt = write_risk_assessment_prompt(package, planspace, scope)
     prompt_path = paths.risk_dir() / f"{scope}-{tag}risk-assessment-prompt.md"
@@ -184,12 +188,8 @@ def _validate_and_dispatch_assessment(
 
 
 def _validate_and_dispatch_optimization(
-    paths: PathRegistry,
     planspace: Path,
     scope: str,
-    package: RiskPackage,
-    parameters: dict,
-    assessment: RiskAssessment,
     *,
     retry_hint: bool = False,
 ) -> RiskPlan | None:
@@ -198,10 +198,8 @@ def _validate_and_dispatch_optimization(
     Returns ``None`` when the prompt fails validation *or* the response cannot
     be parsed.
     """
+    paths = PathRegistry(planspace)
     prompt = write_optimization_prompt(
-        assessment=assessment,
-        package=package,
-        parameters=parameters,
         planspace=planspace,
         scope=scope,
     )
@@ -228,18 +226,12 @@ def _validate_and_dispatch_optimization(
 
 
 def _validate_and_dispatch_lightweight_optimization(
-    paths: PathRegistry,
     planspace: Path,
     scope: str,
-    package: RiskPackage,
-    parameters: dict,
-    assessment: RiskAssessment,
 ) -> RiskPlan | None:
     """Lightweight variant of optimization dispatch (includes try/except)."""
+    paths = PathRegistry(planspace)
     prompt = write_optimization_prompt(
-        assessment=assessment,
-        package=package,
-        parameters=parameters,
         planspace=planspace,
         scope=scope,
         lightweight=True,
@@ -401,12 +393,12 @@ def _apply_history_adjustment(
         primary_step.dominant_risks,
         primary_step.modifiers.blast_radius,
     )
-    bound = _coerce_float(parameters.get("history_adjustment_bound"), 10.0)
+    bound = _coerce_float(parameters.get("history_adjustment_bound"), _DEFAULT_HISTORY_ADJUSTMENT_BOUND)
     bounded_adjustment = clamp_float(adjustment, -bound, bound)
     assessment.package_raw_risk = clamp_int(
         assessment.package_raw_risk + int(round(bounded_adjustment)),
         0,
-        100,
+        MAX_RESIDUAL_RISK,
     )
     if matching_entries:
         assessment.notes.append(

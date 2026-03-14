@@ -11,11 +11,12 @@ from pathlib import Path
 from orchestrator.path_registry import PathRegistry
 from containers import Services
 from intent.service.expansion_facade import handle_user_gate, run_expansion_cycle
+from signals.types import ACTION_CONTINUE
 
 
 def _handle_budget_exhaustion(
     section_number: str, planspace: Path, parent: str,
-    paths: PathRegistry, expansion_count: int, expansion_max: int,
+    expansion_count: int, expansion_max: int,
 ) -> str | None:
     """Handle the case where expansion budget is exhausted.
 
@@ -32,7 +33,7 @@ def _handle_budget_exhaustion(
         "cycles": expansion_count,
     }
     Services.artifact_io().write_json(
-        paths.intent_stalled_signal(section_number),
+        PathRegistry(planspace).intent_stalled_signal(section_number),
         stalled_signal,
     )
     response = Services.pipeline_control().pause_for_parent(
@@ -52,8 +53,6 @@ def run_aligned_expansion(
     parent: str,
     intent_budgets: dict,
     expansion_counts: dict[str, int],
-    surfaces: dict,
-    surface_count: int,
 ) -> str | None:
     """Handle intent expansion when the proposal is aligned but surfaces exist.
 
@@ -62,13 +61,12 @@ def run_aligned_expansion(
         "break" — caller should accept alignment
         None — caller should abort (return None)
     """
-    paths = PathRegistry(planspace)
     expansion_max = intent_budgets.get("intent_expansion_max", 2)
     expansion_count = expansion_counts.get(section_number, 0)
 
     if expansion_count >= expansion_max:
         return _handle_budget_exhaustion(
-            section_number, planspace, parent, paths,
+            section_number, planspace, parent,
             expansion_count, expansion_max,
         )
 
@@ -111,7 +109,7 @@ def run_aligned_expansion(
             f"Section {section_number}: intent "
             f"expanded — re-proposing"
         )
-        return "continue"
+        return ACTION_CONTINUE
 
     return "break"
 

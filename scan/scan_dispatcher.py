@@ -17,13 +17,10 @@ import subprocess
 from pathlib import Path
 
 from scan.service.scan_dispatch_config import (
-    DEFAULT_SCAN_MODELS,
     build_scan_dispatch_command,
     read_scan_model_policy,
     resolve_scan_agent_path,
 )
-
-_DEFAULT_MODELS = DEFAULT_SCAN_MODELS
 
 
 def dispatch_agent(
@@ -65,7 +62,7 @@ def dispatch_agent(
             "agent_file is required — every dispatch must have "
             "behavioral constraints"
         )
-    agent_path = resolve_scan_agent_path(Path(), agent_file)
+    agent_path = resolve_scan_agent_path(agent_file)
     cmd = build_scan_dispatch_command(
         model=model,
         project=project,

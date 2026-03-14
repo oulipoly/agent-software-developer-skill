@@ -16,7 +16,9 @@ from coordination.engine.global_coordinator import (
     run_global_coordination,
 )
 from coordination.service.stall_detector import StallDetector
-from orchestrator.types import Section, SectionResult
+from orchestrator.types import Section, SectionResult, ControlSignal
+from pipeline.context import DispatchContext
+from signals.types import TRUNCATE_DETAIL, TRUNCATE_MEDIUM
 
 
 @dataclass(frozen=True)
@@ -31,7 +33,7 @@ class AssessmentResult:
 def _check_alignment(planspace: Path, parent: str) -> bool:
     """Poll for alignment changes.  Returns True if changed."""
     ctrl = Services.pipeline_control().poll_control_messages(planspace, parent)
-    if ctrl == "alignment_changed":
+    if ctrl == ControlSignal.ALIGNMENT_CHANGED:
         Services.logger().log("Alignment changed — restarting from Phase 1")
         return True
     return False
@@ -93,7 +95,7 @@ def _report_result(
         )
         build_strategic_state(decisions_dir, section_results, planspace)
         for result in remaining:
-            summary = (result.problems or "unknown")[:120]
+            summary = (result.problems or "unknown")[:TRUNCATE_MEDIUM]
             Services.logger().log(f"  - Section {result.section_number}: {summary}")
             Services.communicator().mailbox_send(
                 planspace, parent,
@@ -119,7 +121,7 @@ def _report_result(
                 {
                     "type": p["type"],
                     "section": p["section"],
-                    "description": p["description"][:200],
+                    "description": p["description"][:TRUNCATE_DETAIL],
                 }
                 for p in outstanding
             ],
@@ -133,20 +135,17 @@ def _report_result(
 
 
 def run_coordination_loop(
-    all_sections: list[Section],
     section_results: dict[str, SectionResult],
     sections_by_num: dict[str, Section],
-    planspace: Path,
-    codespace: Path,
-    parent: str,
+    ctx: DispatchContext,
 ) -> str:
     """Run the adaptive coordination loop until completion or exhaustion."""
-    paths = PathRegistry(planspace)
-    decisions_dir = paths.decisions_dir()
+    decisions_dir = ctx.paths.decisions_dir()
 
     # --- Initial assessment -----------------------------------------------
     assessment = _assess_initial_state(
-        section_results, sections_by_num, planspace, parent, decisions_dir,
+        section_results, sections_by_num, ctx.planspace, ctx.parent,
+        decisions_dir,
     )
     if assessment.early_exit_reason is not None:
         return assessment.early_exit_reason
@@ -165,41 +164,43 @@ def run_coordination_loop(
         )
 
     # --- Coordination loop ------------------------------------------------
-    stall = StallDetector(planspace, parent)
+    stall = StallDetector(ctx.planspace, ctx.parent)
     stall.set_initial(len(assessment.misaligned) + outstanding_count)
     termination_reason = CoordinationStatus.EXHAUSTED
 
     for round_num in range(1, MAX_COORDINATION_ROUNDS + 1):
-        if _check_alignment(planspace, parent):
+        if _check_alignment(ctx.planspace, ctx.parent):
             return CoordinationStatus.RESTART_PHASE1
 
         Services.logger().log(f"=== Coordination round {round_num} ===")
-        Services.communicator().mailbox_send(planspace, parent, f"status:coordination:round-{round_num}")
+        Services.communicator().mailbox_send(
+            ctx.planspace, ctx.parent,
+            f"status:coordination:round-{round_num}",
+        )
 
         all_done = run_global_coordination(
-            all_sections, section_results, sections_by_num,
-            planspace, codespace, parent,
+            section_results, sections_by_num, ctx,
         )
 
         if Services.pipeline_control().check_alignment_and_return(
-            planspace, _check_and_clear_alignment_changed,
+            ctx.planspace, _check_and_clear_alignment_changed,
         ):
             Services.logger().log("Alignment changed during coordination — restarting from Phase 1")
             return CoordinationStatus.RESTART_PHASE1
 
         if all_done:
-            if _check_alignment(planspace, parent):
+            if _check_alignment(ctx.planspace, ctx.parent):
                 return CoordinationStatus.RESTART_PHASE1
             Services.logger().log(f"=== All sections ALIGNED after coordination round {round_num} ===")
-            build_strategic_state(decisions_dir, section_results, planspace)
-            Services.communicator().mailbox_send(planspace, parent, "complete")
+            build_strategic_state(decisions_dir, section_results, ctx.planspace)
+            Services.communicator().mailbox_send(ctx.planspace, ctx.parent, "complete")
             return CoordinationStatus.COMPLETE
 
         # Measure progress
         remaining = [r for r in section_results.values() if not r.aligned]
         remaining_outstanding = (
             _collect_outstanding_problems(
-                section_results, sections_by_num, planspace,
+                section_results, sections_by_num, ctx.planspace,
             )
             if not remaining
             else []
@@ -222,7 +223,7 @@ def run_coordination_loop(
 
     # --- Result reporting -------------------------------------------------
     return _report_result(
-        section_results, sections_by_num, planspace, parent,
+        section_results, sections_by_num, ctx.planspace, ctx.parent,
         decisions_dir, round_num, termination_reason,
     )
 

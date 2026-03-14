@@ -7,10 +7,12 @@ from pathlib import Path
 from containers import Services
 from orchestrator.path_registry import PathRegistry
 from intent.service.philosophy_bootstrapper import validate_philosophy_grounding
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
 
 # When remaining axis budget falls below this, prompt the expander to prefer
 # expanding existing axes over creating new ones.
 _AXIS_BUDGET_CONSERVE_THRESHOLD = 6
+_DEFAULT_AXIS_BUDGET = 6
 
 
 def _compose_problem_expander_text(
@@ -121,7 +123,7 @@ def run_problem_expander(
     parent: str,
     *,
     pending_surfaces_path: Path | None = None,
-    remaining_axis_budget: int = 6,
+    remaining_axis_budget: int = _DEFAULT_AXIS_BUDGET,
 ) -> dict | None:
     """Dispatch problem-expander and return its delta."""
     policy = Services.policies().load(planspace)
@@ -168,7 +170,7 @@ def run_problem_expander(
         agent_file=Services.task_router().agent_for("intent.problem_expander"),
     )
 
-    if result == "ALIGNMENT_CHANGED_PENDING":
+    if result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     return Services.signals().read(delta_path)
@@ -220,7 +222,7 @@ def run_philosophy_expander(
         agent_file=Services.task_router().agent_for("intent.philosophy_expander"),
     )
 
-    if result == "ALIGNMENT_CHANGED_PENDING":
+    if result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     delta = Services.signals().read(delta_path)

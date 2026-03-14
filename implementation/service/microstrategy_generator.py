@@ -7,17 +7,18 @@ from orchestrator.path_registry import PathRegistry
 from pipeline.template import TASK_SUBMISSION_SEMANTICS
 from dispatch.prompt.writers import agent_mail_instructions
 from implementation.service.microstrategy_decider import _check_needs_microstrategy
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from orchestrator.types import ControlSignal
+from signals.types import BLOCKING_NEEDS_PARENT
 
 
 def _build_microstrategy_prompt(
     section,
-    paths: PathRegistry,
     codespace: Path,
     planspace: Path,
-    integration_proposal: Path,
-    microstrategy_path: Path,
     agent_name: str,
 ) -> str:
+    paths = PathRegistry(planspace)
     file_list = "\n".join(
         f"- `{codespace / relative_path}`" for relative_path in section.related_files
     )
@@ -32,27 +33,26 @@ def _build_microstrategy_prompt(
         governance_ref = f"\nRead the governance packet: `{governance_packet}`"
 
     return _compose_microstrategy_text(
-        section.number, integration_proposal,
-        paths.alignment_excerpt(section.number), todos_ref, governance_ref,
-        file_list, microstrategy_path,
-        paths.task_request_signal("micro", section.number),
+        section.number,
+        todos_ref, governance_ref, file_list,
         planspace, agent_name,
     )
 
 
 def _compose_microstrategy_text(
     section_number: str,
-    integration_proposal: Path,
-    alignment_excerpt: Path,
     todos_ref: str,
     governance_ref: str,
     file_list: str,
-    microstrategy_path: Path,
-    task_request_signal: Path,
     planspace: Path,
     agent_name: str,
 ) -> str:
     """Return the full prompt text for microstrategy generation."""
+    paths = PathRegistry(planspace)
+    integration_proposal = paths.proposal(section_number)
+    microstrategy_path = paths.microstrategy(section_number)
+    alignment_excerpt = paths.alignment_excerpt(section_number)
+    task_request_signal = paths.task_request_signal("micro", section_number)
     return f"""# Task: Microstrategy for Section {section_number}
 
 ## Context
@@ -95,9 +95,7 @@ v2 format reference. {TASK_SUBMISSION_SEMANTICS}
 
 def _dispatch_and_retry(
     section_number: str,
-    policy: dict,
     micro_prompt_path: Path,
-    artifacts: Path,
     planspace: Path,
     parent: str,
     agent_name: str,
@@ -105,11 +103,13 @@ def _dispatch_and_retry(
     microstrategy_path: Path,
 ) -> str | None:
     """Dispatch microstrategy generation with escalation retry. Returns sentinel or None."""
+    artifacts = PathRegistry(planspace).artifacts
+    policy = Services.policies().load(planspace)
     ctrl = Services.pipeline_control().poll_control_messages(
         planspace, parent, current_section=section_number,
     )
-    if ctrl == "alignment_changed":
-        return "ALIGNMENT_CHANGED_PENDING"
+    if ctrl == ControlSignal.ALIGNMENT_CHANGED:
+        return ALIGNMENT_CHANGED_PENDING
 
     micro_output_path = artifacts / f"microstrategy-{section_number}-output.md"
     micro_result = Services.dispatcher().dispatch(
@@ -119,12 +119,12 @@ def _dispatch_and_retry(
         codespace=codespace, section_number=section_number,
         agent_file=Services.task_router().agent_for("implementation.microstrategy"),
     )
-    if micro_result == "ALIGNMENT_CHANGED_PENDING":
+    if micro_result == ALIGNMENT_CHANGED_PENDING:
         return micro_result
 
     paths = PathRegistry(planspace)
     Services.flow_ingestion().ingest_and_submit(
-        planspace, db_path=planspace / "run.db",
+        planspace,
         submitted_by=f"microstrategy-{section_number}",
         signal_path=paths.task_request_signal("micro", section_number),
         origin_refs=[str(microstrategy_path)],
@@ -143,7 +143,7 @@ def _dispatch_and_retry(
             codespace=codespace, section_number=section_number,
             agent_file=Services.task_router().agent_for("implementation.microstrategy"),
         )
-        if escalated_result == "ALIGNMENT_CHANGED_PENDING":
+        if escalated_result == ALIGNMENT_CHANGED_PENDING:
             return escalated_result
 
     return None
@@ -151,16 +151,16 @@ def _dispatch_and_retry(
 
 def _handle_microstrategy_failure(
     section_number: str,
-    paths: PathRegistry,
     planspace: Path,
     parent: str,
 ) -> None:
+    paths = PathRegistry(planspace)
     Services.logger().log(
         f"Section {section_number}: microstrategy generation "
         f"failed — emitting blocker signal"
     )
     blocker = {
-        "state": "NEEDS_PARENT",
+        "state": BLOCKING_NEEDS_PARENT,
         "section": str(section_number),
         "detail": "Microstrategy generation failed after primary + escalation attempts",
         "needs": "Tactical breakdown from upstream or decision to proceed without microstrategy",
@@ -214,8 +214,7 @@ def run_microstrategy(
     micro_prompt_path = paths.artifacts / f"microstrategy-{section.number}-prompt.md"
 
     rendered = _build_microstrategy_prompt(
-        section, paths, codespace, planspace,
-        integration_proposal, microstrategy_path, agent_name,
+        section, codespace, planspace, agent_name,
     )
     violations = Services.prompt_guard().validate_dynamic(rendered)
     if violations:
@@ -228,7 +227,7 @@ def run_microstrategy(
     Services.communicator().log_artifact(planspace, f"prompt:microstrategy-{section.number}")
 
     sentinel = _dispatch_and_retry(
-        section.number, policy, micro_prompt_path, paths.artifacts,
+        section.number, micro_prompt_path,
         planspace, parent, agent_name, codespace, microstrategy_path,
     )
     if sentinel:
@@ -247,5 +246,5 @@ def run_microstrategy(
         )
         return microstrategy_path
 
-    _handle_microstrategy_failure(section.number, paths, planspace, parent)
+    _handle_microstrategy_failure(section.number, planspace, parent)
     return None

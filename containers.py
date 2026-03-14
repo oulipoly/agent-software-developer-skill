@@ -123,9 +123,9 @@ class PipelineControlService:
         from orchestrator.service.pipeline_control import poll_control_messages
         return poll_control_messages(planspace, parent, current_section)
 
-    def handle_pending_messages(self, planspace, sections, affected) -> bool:
+    def handle_pending_messages(self, planspace) -> bool:
         from orchestrator.service.pipeline_control import handle_pending_messages
-        return handle_pending_messages(planspace, sections, affected)
+        return handle_pending_messages(planspace)
 
     def alignment_changed_pending(self, planspace) -> bool:
         from staleness.service.change_tracker import check_pending
@@ -177,20 +177,20 @@ class PipelineControlService:
         wait_if_paused(planspace, parent)
 
     def requeue_changed_sections(
-        self, completed, queue, sections_by_num, planspace, codespace,
+        self, completed, queue, sections_by_num, planspace,
         *, current_section=None,
     ) -> list[str]:
         from orchestrator.service.pipeline_control import requeue_changed_sections
         return requeue_changed_sections(
-            completed, queue, sections_by_num, planspace, codespace,
+            completed, queue, sections_by_num, planspace,
             current_section=current_section,
         )
 
-    def section_inputs_hash(self, section_number, planspace, codespace, sections_by_num=None) -> str:
+    def section_inputs_hash(self, section_number, planspace, sections_by_num=None) -> str:
         from staleness.service.input_hasher import section_inputs_hash
         if sections_by_num is None:
             sections_by_num = {}
-        return section_inputs_hash(section_number, planspace, codespace, sections_by_num)
+        return section_inputs_hash(section_number, planspace, sections_by_num)
 
     def coordination_recheck_hash(self, sec_num, planspace, codespace, sections_by_num=None, modified_files=None) -> str:
         from staleness.service.input_hasher import coordination_recheck_hash
@@ -309,13 +309,10 @@ class DispatchHelperService:
     """Cross-cutting dispatch helpers: signals, summaries, model-choice audit."""
 
     def check_agent_signals(
-        self, output, signal_path=None, output_path=None,
-        planspace=None, parent=None, codespace=None,
+        self, signal_path=None,
     ):
         from dispatch.helpers.signal_checker import check_agent_signals
-        return check_agent_signals(
-            output, signal_path, output_path, planspace, parent, codespace,
-        )
+        return check_agent_signals(signal_path)
 
     def summarize_output(self, output: str, max_len: int = 200) -> str:
         from dispatch.helpers.signal_checker import summarize_output
@@ -358,13 +355,13 @@ class CrossSectionService:
 class FlowIngestionService:
     """Flow task submission and ingestion."""
 
-    def ingest_and_submit(self, planspace, db_path, submitted_by, signal_path, **kwargs):
+    def ingest_and_submit(self, planspace, submitted_by, signal_path, *, db_path=None, **kwargs):
         from flow.service.task_request_ingestor import ingest_and_submit
-        return ingest_and_submit(planspace, db_path, submitted_by, signal_path, **kwargs)
+        return ingest_and_submit(planspace, submitted_by, signal_path, db_path=db_path, **kwargs)
 
-    def submit_chain(self, db_path, submitted_by, steps, **kwargs):
+    def submit_chain(self, env, steps, **kwargs):
         from flow.engine.flow_submitter import submit_chain
-        return submit_chain(db_path, submitted_by, steps, **kwargs)
+        return submit_chain(env, steps, **kwargs)
 
 
 class StalenessDetectionService:
@@ -423,14 +420,14 @@ class SectionAlignmentService:
         return collect_modified_files(planspace, section, codespace)
 
     def run_alignment_check(
-        self, section, planspace, codespace, parent, sec_num,
-        output_prefix="align", max_retries=2, *, model: str, adjudicator_model: str,
+        self, section, planspace, codespace, parent,
+        output_prefix="align", max_retries=2, *, model: str,
     ):
         from staleness.service.section_alignment_checker import _run_alignment_check_with_retries
         return _run_alignment_check_with_retries(
-            section, planspace, codespace, parent, sec_num,
+            section, planspace, codespace, parent,
             output_prefix, max_retries,
-            model=model, adjudicator_model=adjudicator_model,
+            model=model,
         )
 
     def parse_alignment_verdict(self, result):

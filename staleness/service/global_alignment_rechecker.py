@@ -12,7 +12,9 @@ from staleness.service.section_alignment_checker import (
     _run_alignment_check_with_retries,
 )
 from coordination.service.completion_handler import read_incoming_notes
-from orchestrator.types import Section, SectionResult
+from orchestrator.types import Section, SectionResult, ControlSignal
+from signals.types import ALIGNMENT_INVALID_FRAME
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
 
 
 def _update_result(
@@ -33,19 +35,19 @@ def _update_result(
 
 
 def _recheck_section(
-    sec_num: str,
     section: Section,
     section_results: dict[str, SectionResult],
     sections_by_num: dict[str, Section],
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
-    policy: dict,
 ) -> str | None:
     """Recheck a single section's alignment. Returns a CoordinationStatus to abort, or None to continue."""
+    sec_num = section.number
+    paths = PathRegistry(planspace)
+    policy = Services.policies().load(planspace)
     cur_hash = Services.pipeline_control().section_inputs_hash(
-        sec_num, planspace, codespace, sections_by_num,
+        sec_num, planspace, sections_by_num,
     )
     prev_hash_file = paths.phase2_input_hash(sec_num)
     prev_hash = (
@@ -63,7 +65,7 @@ def _recheck_section(
     prev_hash_file.write_text(cur_hash, encoding="utf-8")
 
     ctrl = Services.pipeline_control().poll_control_messages(planspace, parent, sec_num)
-    if ctrl == "alignment_changed":
+    if ctrl == ControlSignal.ALIGNMENT_CHANGED:
         Services.logger().log("Alignment changed during Phase 2 — restarting from Phase 1")
         return CoordinationStatus.RESTART_PHASE1
 
@@ -72,14 +74,13 @@ def _recheck_section(
         Services.logger().log(f"Section {sec_num}: has incoming notes for global alignment check")
 
     align_result = _run_alignment_check_with_retries(
-        section, planspace, codespace, parent, sec_num,
+        section, planspace, codespace, parent,
         output_prefix="global-align",
         model=Services.policies().resolve(policy, "alignment"),
-        adjudicator_model=Services.policies().resolve(policy, "adjudicator"),
     )
-    if align_result == "ALIGNMENT_CHANGED_PENDING":
+    if align_result == ALIGNMENT_CHANGED_PENDING:
         return CoordinationStatus.RESTART_PHASE1
-    if align_result == "INVALID_FRAME":
+    if align_result == ALIGNMENT_INVALID_FRAME:
         Services.logger().log(
             f"Section {sec_num}: invalid alignment frame — requires parent intervention",
         )
@@ -94,8 +95,8 @@ def _recheck_section(
         return None
 
     _apply_alignment_outcome(
-        align_result, sec_num, paths, planspace, parent, codespace,
-        policy, section_results,
+        align_result, sec_num, planspace, parent, codespace,
+        section_results,
     )
     return None
 
@@ -103,14 +104,14 @@ def _recheck_section(
 def _apply_alignment_outcome(
     align_result,
     sec_num: str,
-    paths: PathRegistry,
     planspace: Path,
     parent: str,
     codespace: Path,
-    policy: dict,
     section_results: dict[str, SectionResult],
 ) -> None:
     """Extract problems and signals from alignment output, update results."""
+    paths = PathRegistry(planspace)
+    policy = Services.policies().load(planspace)
     global_align_output = paths.artifacts / f"global-align-{sec_num}-output.md"
     problems = _extract_problems(
         align_result, output_path=global_align_output,
@@ -120,10 +121,7 @@ def _apply_alignment_outcome(
     main_signal_dir = paths.signals_dir()
     main_signal_dir.mkdir(parents=True, exist_ok=True)
     signal, detail = Services.dispatch_helpers().check_agent_signals(
-        align_result,
         signal_path=main_signal_dir / f"global-align-{sec_num}-signal.json",
-        output_path=global_align_output,
-        planspace=planspace, parent=parent, codespace=codespace,
     )
 
     if problems is None and signal is None:
@@ -146,7 +144,6 @@ def run_global_alignment_recheck(
 ) -> str:
     """Refresh per-section alignment results for Phase 2."""
     paths = PathRegistry(planspace)
-    policy = Services.policies().load(planspace)
     Services.logger().log("=== Phase 2: global coordination ===")
     Services.logger().log("Re-checking alignment across all sections...")
 
@@ -155,8 +152,8 @@ def run_global_alignment_recheck(
 
     for sec_num, section in sections_by_num.items():
         abort_status = _recheck_section(
-            sec_num, section, section_results, sections_by_num,
-            planspace, codespace, parent, paths, policy,
+            section, section_results, sections_by_num,
+            planspace, codespace, parent,
         )
         if abort_status is not None:
             return abort_status

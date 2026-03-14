@@ -39,13 +39,13 @@ from scan.substrate.prompt_builder import (
 from scan.substrate.related_files import apply_related_files_updates
 from scan.substrate.schemas import read_seed_plan_failclosed, read_shard_failclosed
 from containers import Services
+from signals.types import BLOCKING_NEEDS_PARENT
 
 
 # ---- Helpers ----
 
 
 def _check_prerequisites(
-    registry: PathRegistry,
     artifacts_dir: Path,
     sections_dir: Path,
 ) -> tuple[str, list[Path], int] | None:
@@ -60,7 +60,7 @@ def _check_prerequisites(
         print("[SUBSTRATE] No project-mode signal found -- writing NEEDS_PARENT")
         _write_status(
             artifacts_dir,
-            state="NEEDS_PARENT",
+            state=BLOCKING_NEEDS_PARENT,
             project_mode="unknown",
             total_sections=0,
             vacuum_sections=[],
@@ -73,7 +73,7 @@ def _check_prerequisites(
         print(f"[SUBSTRATE] Sections directory not found: {sections_dir}")
         _write_status(
             artifacts_dir,
-            state="NEEDS_PARENT",
+            state=BLOCKING_NEEDS_PARENT,
             project_mode=project_mode,
             total_sections=0,
             vacuum_sections=[],
@@ -87,7 +87,7 @@ def _check_prerequisites(
         print("[SUBSTRATE] No section files found")
         _write_status(
             artifacts_dir,
-            state="NEEDS_PARENT",
+            state=BLOCKING_NEEDS_PARENT,
             project_mode=project_mode,
             total_sections=0,
             vacuum_sections=[],
@@ -184,7 +184,6 @@ def _run_shard_exploration(
     target_paths: dict[str, Path],
     registry: PathRegistry,
     codespace: Path,
-    planspace: Path,
     model_policy: dict,
 ) -> list[str]:
     """Phase A: run shard explorer for each target section.
@@ -203,7 +202,7 @@ def _run_shard_exploration(
         print(f"[SUBSTRATE]   Shard explorer: section-{section_num}")
 
         prompt_path = write_shard_prompt(
-            section_num, section_path, planspace, codespace,
+            section_num, section_path, registry.planspace, codespace,
         )
         output_path = logs_dir / f"shard-{section_num}-output.txt"
 
@@ -280,10 +279,10 @@ def _validate_pruner_outputs(
         prune_signal = Services.artifact_io().read_json(prune_signal_path)
         if isinstance(prune_signal, dict):
             status_val = prune_signal.get("state", "").upper()
-            if status_val == "NEEDS_PARENT":
+            if status_val == BLOCKING_NEEDS_PARENT:
                 reason = prune_signal.get("reason", "no reason given")
                 print(f"[SUBSTRATE] Pruner signalled NEEDS_PARENT: {reason}")
-                _write_status(artifacts_dir, state="NEEDS_PARENT",
+                _write_status(artifacts_dir, state=BLOCKING_NEEDS_PARENT,
                               notes=f"Pruner deferred: {reason}",
                               **status_kwargs)
                 return None
@@ -297,12 +296,10 @@ def _validate_pruner_outputs(
 
 
 def _run_pruning(
-    registry: PathRegistry,
     codespace: Path,
     planspace: Path,
     valid_shards: list[str],
     model_policy: dict,
-    artifacts_dir: Path,
     project_mode: str,
     total_sections: int,
     vacuum_sections: list[str],
@@ -313,6 +310,8 @@ def _run_pruning(
     Returns ``(seed_plan, substrate_md_path)`` on success, or ``None``
     on failure (writes status on failure).
     """
+    registry = PathRegistry(planspace)
+    artifacts_dir = registry.artifacts
     print("[SUBSTRATE] Phase B: Pruner (strategic merge)")
     logs_dir = registry.substrate_dir() / "logs"
     pruner_prompt = write_pruner_prompt(
@@ -395,7 +394,7 @@ def _run_seeding_and_apply(
 
     # ---- Apply related-files updates ----
     print("[SUBSTRATE] Applying related-files updates")
-    updated_count = apply_related_files_updates(planspace, codespace)
+    updated_count = apply_related_files_updates(planspace)
     print(f"[SUBSTRATE] Updated {updated_count} section spec(s)")
 
     return updated_count
@@ -432,7 +431,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
     sections_dir = registry.sections_dir()
 
     # Steps 1-2: Read project mode and load section specs
-    prereqs = _check_prerequisites(registry, artifacts_dir, sections_dir)
+    prereqs = _check_prerequisites(artifacts_dir, sections_dir)
     if prereqs is None:
         return False
     project_mode, section_files, total_sections = prereqs
@@ -452,7 +451,7 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
 
     # Phase A: Shard exploration
     valid_shards = _run_shard_exploration(
-        target_sections, target_paths, registry, codespace, planspace,
+        target_sections, target_paths, registry, codespace,
         model_policy,
     )
     if not valid_shards:
@@ -470,8 +469,8 @@ def run_substrate_discovery(planspace: Path, codespace: Path) -> bool:
 
     # Phase B: Pruning
     pruning_result = _run_pruning(
-        registry, codespace, planspace, valid_shards, model_policy,
-        artifacts_dir, project_mode, total_sections, vacuum_sections,
+        codespace, planspace, valid_shards, model_policy,
+        project_mode, total_sections, vacuum_sections,
         trigger_threshold,
     )
     if pruning_result is None:

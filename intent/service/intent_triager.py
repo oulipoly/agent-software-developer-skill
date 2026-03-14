@@ -8,8 +8,16 @@ from containers import Services
 from orchestrator.path_registry import PathRegistry
 from risk.repository.history import read_history
 from risk.types import PostureProfile
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
 
 _SUMMARY_SNIPPET_TRUNCATION = 500
+
+_DEFAULT_PROPOSAL_MAX = 5
+_DEFAULT_IMPLEMENTATION_MAX = 5
+_DEFAULT_EXPANSION_MAX = 2
+_DEFAULT_MAX_NEW_SURFACES = 8
+_DEFAULT_MAX_NEW_AXES = 6
+_DEFAULT_RISK_BUDGET_HINT = 4
 
 
 def run_intent_triage(
@@ -58,7 +66,7 @@ def run_intent_triage(
         planspace, parent, codespace, section_number,
     )
 
-    if result == "ALIGNMENT_CHANGED_PENDING":
+    if result == ALIGNMENT_CHANGED_PENDING:
         return _augment_risk_hints(
             _full_default(section_number), section_number, planspace, **risk_kw,
         )
@@ -68,8 +76,7 @@ def run_intent_triage(
     )
     if triage:
         escalated = _try_escalation(
-            triage, section_number, policy, triage_prompt_path,
-            triage_output_path, triage_signal_path, planspace, parent, codespace,
+            triage, section_number, planspace, parent, codespace,
         )
         if escalated is not None:
             return _augment_risk_hints(
@@ -216,12 +223,16 @@ def _dispatch_triage(
 
 
 def _try_escalation(
-    triage, section_number, policy, triage_prompt_path,
-    triage_output_path, triage_signal_path, planspace, parent, codespace,
+    triage, section_number, planspace, parent, codespace,
 ):
     if not triage.get("escalate"):
         return None
 
+    paths = PathRegistry(planspace)
+    triage_prompt_path = paths.intent_triage_prompt(section_number)
+    triage_output_path = paths.intent_triage_output(section_number)
+    triage_signal_path = paths.intent_triage_signal(section_number)
+    policy = Services.policies().load(planspace)
     Services.logger().log(
         f"Section {section_number}: triage flagged escalation — "
         f"re-dispatching with stronger model",
@@ -271,16 +282,16 @@ def _full_default(section_number: str) -> dict:
         "intent_mode": "full",
         "confidence": "low",
         "budgets": {
-            "proposal_max": 5,
-            "implementation_max": 5,
-            "intent_expansion_max": 2,
-            "max_new_surfaces_per_cycle": 8,
-            "max_new_axes_total": 6,
+            "proposal_max": _DEFAULT_PROPOSAL_MAX,
+            "implementation_max": _DEFAULT_IMPLEMENTATION_MAX,
+            "intent_expansion_max": _DEFAULT_EXPANSION_MAX,
+            "max_new_surfaces_per_cycle": _DEFAULT_MAX_NEW_SURFACES,
+            "max_new_axes_total": _DEFAULT_MAX_NEW_AXES,
         },
         "reason": "default full (triage unavailable — uncertainty favors strategy)",
         "risk_mode": "full",
         "risk_confidence": "low",
-        "risk_budget_hint": 4,
+        "risk_budget_hint": _DEFAULT_RISK_BUDGET_HINT,
         "posture_floor": None,
     }
 

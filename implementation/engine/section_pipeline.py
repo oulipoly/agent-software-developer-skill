@@ -7,16 +7,15 @@ from proposal.service.problem_frame_gate import validate_problem_frame
 from containers import Services
 from orchestrator.path_registry import PathRegistry
 from implementation.service.microstrategy_generator import run_microstrategy
+from pipeline.context import DispatchContext
 from proposal.engine.proposal_cycle import run_proposal_loop
 from proposal.service.readiness_resolver import resolve_readiness
 from proposal.service.excerpt_extractor import extract_excerpts
 from implementation.engine.implementation_cycle import run_implementation_loop
 from intent.service.recurrence_emitter import emit_recurrence_signal
-from dispatch.service.tool_registry_manager import (
-    handle_tool_friction,
-    surface_tool_registry,
-    validate_tool_registry_after_implementation,
-)
+from dispatch.service.tool_surface_writer import surface_tool_registry
+from dispatch.service.tool_validator import validate_tool_registry_after_implementation
+from dispatch.service.tool_bridge import handle_tool_friction
 
 from coordination.service.completion_handler import (
     post_section_completion,
@@ -27,6 +26,10 @@ from intent.service.intent_pack_generator import ensure_global_philosophy, gener
 from intent.service.intent_triager import run_intent_triage
 from reconciliation.engine.cross_section_reconciler import load_reconciliation_result
 from implementation.service.microstrategy_decider import _extract_todos_from_files
+from signals.types import (
+    ACTION_ABORT, ACTION_SKIP,
+    PASS_MODE_IMPLEMENTATION, PASS_MODE_PROPOSAL,
+)
 
 
 _DEFAULT_PROPOSAL_CYCLE_MAX = 5
@@ -74,17 +77,15 @@ def _run_impact_triage(
         parent,
         incoming_notes,
     )
-    if triage_status == "abort":
+    if triage_status == ACTION_ABORT:
         return False, None
-    if triage_status == "skip":
+    if triage_status == ACTION_SKIP:
         return False, triage_files if triage_files is not None else []
     return True, None
 
 
 def _surface_tools(
     section: Section,
-    paths: PathRegistry,
-    artifacts: Path,
     planspace: Path,
     parent: str,
     codespace: Path,
@@ -93,6 +94,8 @@ def _surface_tools(
 
     Returns the pre-implementation tool count for later validation.
     """
+    paths = PathRegistry(planspace)
+    artifacts = paths.artifacts
     tools_available_path = paths.tools_available(section.number)
     tool_registry_path = paths.tool_registry()
     # Compatibility note: stale surface cleanup still occurs in the extracted
@@ -157,7 +160,7 @@ def _resolve_readiness_and_route(
     )
     if not readiness_result.ready:
         return readiness_result.proposal_pass_result
-    if pass_mode == "proposal":
+    if pass_mode == PASS_MODE_PROPOSAL:
         return readiness_result.proposal_pass_result
     return _CONTINUE
 
@@ -175,7 +178,6 @@ _CONTINUE = object()
 def _check_upstream_freshness(
     section: Section,
     planspace: Path,
-    artifacts: Path,
 ) -> bool:
     """Check readiness and reconciliation freshness gates.
 
@@ -226,7 +228,6 @@ def _run_microstrategy_step(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
 ) -> bool:
     """Run microstrategy and check for blockers.
 
@@ -238,7 +239,7 @@ def _run_microstrategy_step(
         codespace,
         parent,
     )
-    microstrategy_blocker = paths.microstrategy_blocker_signal(section.number)
+    microstrategy_blocker = PathRegistry(planspace).microstrategy_blocker_signal(section.number)
     if microstrategy_result is None and microstrategy_blocker.exists():
         return False
     return True
@@ -248,7 +249,6 @@ def _validate_tools_post_impl(
     section: Section,
     pre_tool_total: int,
     tool_registry_path: Path,
-    artifacts: Path,
     planspace: Path,
     parent: str,
     codespace: Path,
@@ -259,7 +259,6 @@ def _validate_tools_post_impl(
         section_number=section.number,
         pre_tool_total=pre_tool_total,
         tool_registry_path=tool_registry_path,
-        artifacts=artifacts,
         planspace=planspace,
         parent=parent,
         codespace=codespace,
@@ -269,7 +268,6 @@ def _validate_tools_post_impl(
         section_number=section.number,
         section_path=section.path,
         all_sections=all_sections,
-        artifacts=artifacts,
         tool_registry_path=tool_registry_path,
         friction_signal_path=friction_signal_path,
         planspace=planspace,
@@ -288,12 +286,9 @@ def _run_post_completion(
 ) -> None:
     """Run post-completion impact analysis and consequence notes."""
     if actually_changed and all_sections:
-        policy = Services.policies().load(planspace)
         post_section_completion(
             section, actually_changed, all_sections,
             planspace, codespace, parent,
-            impact_model=Services.policies().resolve(policy, "impact_analysis"),
-            normalizer_model=Services.policies().resolve(policy, "impact_normalizer"),
         )
 
 
@@ -306,7 +301,6 @@ def _run_implementation_pass(
     planspace: Path, codespace: Path, section: Section, parent: str,
     *,
     all_sections: list[Section] | None = None,
-    artifacts: Path,
 ) -> list[str] | None:
     """Execute implementation for a section whose proposal is already aligned.
 
@@ -341,7 +335,6 @@ def _run_implementation_pass(
     return _run_section_implementation_steps(
         planspace, codespace, section, parent,
         all_sections=all_sections,
-        artifacts=artifacts,
     )
 
 
@@ -376,15 +369,11 @@ def run_section(
     - ``ProposalPassResult`` when ``pass_mode="proposal"`` completes.
     - ``None`` if paused/aborted (waiting for parent).
     """
-    paths = PathRegistry(planspace)
-    artifacts = paths.artifacts
-
     # Implementation-only mode: skip proposal steps, jump to execution
-    if pass_mode == "implementation":
+    if pass_mode == PASS_MODE_IMPLEMENTATION:
         return _run_implementation_pass(
             planspace, codespace, section, parent,
             all_sections=all_sections,
-            artifacts=artifacts,
         )
 
     # Recurrence signal
@@ -403,7 +392,7 @@ def run_section(
     # Step 0b: Surface section-relevant tools from tool registry
     # Compatibility note: stale surface cleanup still occurs in the extracted
     # helper via tools_available_path.exists() / tools_available_path.unlink().
-    _surface_tools(section, paths, artifacts, planspace, parent, codespace)
+    _surface_tools(section, planspace, parent, codespace)
 
     # Step 1: Section setup — extract excerpts from global documents
     if extract_excerpts(section, planspace, codespace, parent) is None:
@@ -422,7 +411,8 @@ def run_section(
 
     # Step 2: Proposal loop
     if run_proposal_loop(
-        section, planspace, codespace, parent,
+        section,
+        DispatchContext(planspace=planspace, codespace=codespace, parent=parent),
         cycle_budget, incoming_notes,
     ) is None:
         return None
@@ -438,7 +428,6 @@ def run_section(
     return _run_section_implementation_steps(
         planspace, codespace, section, parent,
         all_sections=all_sections,
-        artifacts=artifacts,
     )
 
 
@@ -446,7 +435,6 @@ def _run_section_implementation_steps(
     planspace: Path, codespace: Path, section: Section, parent: str,
     *,
     all_sections: list[Section] | None = None,
-    artifacts: Path,
 ) -> list[str] | None:
     """Execute microstrategy through post-completion for a section.
 
@@ -457,7 +445,7 @@ def _run_section_implementation_steps(
     paths = PathRegistry(planspace)
 
     # Upstream freshness gate
-    if not _check_upstream_freshness(section, planspace, artifacts):
+    if not _check_upstream_freshness(section, planspace):
         return None
 
     # Load cycle budget and pre-implementation tool count
@@ -465,7 +453,7 @@ def _run_section_implementation_steps(
     tool_registry_path, pre_tool_total = _count_pre_impl_tools(paths)
 
     # Step 2.5: Generate microstrategy
-    if not _run_microstrategy_step(section, planspace, codespace, parent, paths):
+    if not _run_microstrategy_step(section, planspace, codespace, parent):
         return None
 
     # Step 3: Strategic implementation
@@ -477,7 +465,7 @@ def _run_section_implementation_steps(
 
     # Step 3b-3c: Validate tool registry and handle friction
     _validate_tools_post_impl(
-        section, pre_tool_total, tool_registry_path, artifacts,
+        section, pre_tool_total, tool_registry_path,
         planspace, parent, codespace, all_sections,
     )
 

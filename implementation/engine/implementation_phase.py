@@ -40,6 +40,7 @@ from implementation.service.risk_history_recorder import (
     append_risk_review_failure_history,
 )
 from orchestrator.types import ProposalPassResult, Section, SectionResult
+from signals.types import PASS_MODE_IMPLEMENTATION
 
 _MAX_FRONTIER_ITERATIONS = 3
 
@@ -232,13 +233,13 @@ def _maybe_reassess_deferred_steps(
 
 def _run_risk_review(
     planspace: Path,
-    sec_num: str,
     section: Section,
 ) -> RiskPlan | None:
     """Run ROAL risk review for a section before implementation.
 
     Returns the risk plan, or None on failure.
     """
+    sec_num = section.number
     scope = f"section-{sec_num}"
     paths = PathRegistry(planspace)
     package: RiskPackage | None = None
@@ -306,14 +307,13 @@ def _run_risk_review(
 def _check_abort_conditions(
     planspace: Path,
     parent: str,
-    impl_completed: set[str],
 ) -> None:
     """Check for abort/restart signals before processing a section.
 
     Raises ImplementationPassExit on parent abort,
     ImplementationPassRestart on alignment change.
     """
-    if Services.pipeline_control().handle_pending_messages(planspace, [], impl_completed):
+    if Services.pipeline_control().handle_pending_messages(planspace):
         Services.logger().log("Aborted by parent during implementation pass")
         Services.communicator().mailbox_send(planspace, parent, "fail:aborted")
         raise ImplementationPassExit
@@ -329,7 +329,6 @@ def _execute_frontier_slice(
     planspace: Path,
     codespace: Path,
     section: Section,
-    sec_num: str,
     parent: str,
     sections_by_num: dict[str, Section],
     current_risk_plan: RiskPlan,
@@ -345,6 +344,7 @@ def _execute_frontier_slice(
 
     Raises ImplementationPassRestart on alignment change.
     """
+    sec_num = section.number
     manifest_path = write_modified_file_manifest(
         planspace,
         sec_num,
@@ -385,7 +385,7 @@ def _execute_frontier_slice(
         section,
         parent,
         all_sections=list(sections_by_num.values()),
-        pass_mode="implementation",
+        pass_mode=PASS_MODE_IMPLEMENTATION,
     )
 
     Services.pipeline_control().check_alignment_and_raise(
@@ -429,7 +429,6 @@ def _run_frontier_iterations(
     planspace: Path,
     codespace: Path,
     section: Section,
-    sec_num: str,
     parent: str,
     sections_by_num: dict[str, Section],
     risk_plan: RiskPlan,
@@ -452,7 +451,6 @@ def _run_frontier_iterations(
                 planspace,
                 codespace,
                 section,
-                sec_num,
                 parent,
                 sections_by_num,
                 current_risk_plan,
@@ -482,15 +480,14 @@ def _run_frontier_iterations(
 
 
 def _persist_section_hashes(
-    paths: PathRegistry,
     sec_num: str,
     planspace: Path,
-    codespace: Path,
     sections_by_num: dict[str, Section],
 ) -> None:
     """Write baseline and phase2 section-input hashes after implementation."""
+    paths = PathRegistry(planspace)
     cur_hash = Services.pipeline_control().section_inputs_hash(
-        sec_num, planspace, codespace, sections_by_num,
+        sec_num, planspace, sections_by_num,
     )
 
     baseline_hash_dir = paths.section_inputs_hashes_dir()
@@ -503,13 +500,14 @@ def _persist_section_hashes(
 
 
 def _prepare_risk_plan(
-    planspace: Path, sec_num: str, section: Section,
+    planspace: Path, section: Section,
 ) -> tuple[RiskPlan | None, bool]:
     """Run risk review, persist ROAL artifacts, check accepted frontier.
 
     Returns (risk_plan, should_skip).
     """
-    risk_plan = _run_risk_review(planspace, sec_num, section)
+    sec_num = section.number
+    risk_plan = _run_risk_review(planspace, section)
     if risk_plan is None:
         refresh_roal_input_index(
             planspace, sec_num,
@@ -544,19 +542,18 @@ def _handle_failed_impl(
 
 
 def _implement_section(
-    sec_num: str,
     section: Section,
     sections_by_num: dict[str, Section],
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
 ) -> SectionResult | None:
     """Process a single section through the implementation pipeline.
 
     Returns a ``SectionResult`` when the section was successfully
     implemented, or ``None`` when it was skipped or failed.
     """
+    sec_num = section.number
     Services.logger().log(f"=== Section {sec_num} implementation pass ===")
     Services.logger().log_lifecycle(planspace, f"start:section:{sec_num}:impl", f"round {section.solve_count}")
 
@@ -568,14 +565,14 @@ def _implement_section(
         )
         return None
 
-    risk_plan, should_skip = _prepare_risk_plan(planspace, sec_num, section)
+    risk_plan, should_skip = _prepare_risk_plan(planspace, section)
     if should_skip:
         return None
 
     modified_files = run_section(
         planspace, codespace, section, parent,
         all_sections=list(sections_by_num.values()),
-        pass_mode="implementation",
+        pass_mode=PASS_MODE_IMPLEMENTATION,
     )
 
     Services.pipeline_control().check_alignment_and_raise(
@@ -594,7 +591,7 @@ def _implement_section(
     if risk_plan is not None:
         append_risk_history(planspace, sec_num, risk_plan, all_modified_files)
         _, final_problem, _ = _run_frontier_iterations(
-            planspace, codespace, section, sec_num, parent,
+            planspace, codespace, section, parent,
             sections_by_num, risk_plan, all_modified_files,
         )
 
@@ -603,7 +600,7 @@ def _implement_section(
         f"done:{sec_num}:{len(all_modified_files)} files modified",
     )
 
-    _persist_section_hashes(paths, sec_num, planspace, codespace, sections_by_num)
+    _persist_section_hashes(sec_num, planspace, sections_by_num)
     Services.logger().log(f"Section {sec_num}: implementation done")
     Services.logger().log_lifecycle(planspace, f"end:section:{sec_num}:impl", "done")
 
@@ -623,29 +620,24 @@ def run_implementation_pass(
     parent: str,
 ) -> dict[str, SectionResult]:
     """Run the implementation pass for execution-ready sections."""
-    paths = PathRegistry(planspace)
     ready_sections = sorted(
         sec_num
         for sec_num, proposal_result in proposal_results.items()
         if proposal_result.execution_ready
     )
-    impl_completed: set[str] = set()
     section_results: dict[str, SectionResult] = {}
 
     for sec_num in ready_sections:
-        _check_abort_conditions(planspace, parent, impl_completed)
+        _check_abort_conditions(planspace, parent)
 
         result = _implement_section(
-            sec_num,
             sections_by_num[sec_num],
             sections_by_num,
             planspace,
             codespace,
             parent,
-            paths,
         )
         if result is not None:
-            impl_completed.add(sec_num)
             section_results[sec_num] = result
 
     return section_results

@@ -7,15 +7,18 @@ from containers import Services
 from intent.service.philosophy_bootstrapper import (
     ensure_global_philosophy as _ensure_global_philosophy,
     sha256_file as _sha256_file_impl,
-    validate_philosophy_grounding as _validate_grounding,
 )
 from intent.service.philosophy_catalog import (
+    _DEFAULT_CATALOG_MAX_DEPTH,
+    _DEFAULT_CATALOG_MAX_FILES,
+    _DEFAULT_CATALOG_MAX_SIZE_KB,
     build_philosophy_catalog as _build_catalog,
     walk_md_bounded as _walk_bounded,
 )
 from orchestrator.path_registry import PathRegistry
 
 from orchestrator.types import Section
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
 
 
 
@@ -38,9 +41,9 @@ def _build_philosophy_catalog(
     planspace: Path,
     codespace: Path,
     *,
-    max_files: int = 50,
-    max_size_kb: int = 100,
-    max_depth: int = 3,
+    max_files: int = _DEFAULT_CATALOG_MAX_FILES,
+    max_size_kb: int = _DEFAULT_CATALOG_MAX_SIZE_KB,
+    max_depth: int = _DEFAULT_CATALOG_MAX_DEPTH,
     extensions: frozenset[str] = frozenset({".md"}),
 ) -> list[dict]:
     return _build_catalog(
@@ -53,32 +56,13 @@ def _build_philosophy_catalog(
     )
 
 
-def _validate_philosophy_grounding(
-    philosophy_path: Path,
-    source_map_path: Path,
-    artifacts: Path,
-) -> bool:
-    return _validate_grounding(
-        philosophy_path,
-        source_map_path,
-        artifacts,
-    )
-
-
 def _sha256_file(path: Path) -> str:
     return _sha256_file_impl(path)
 
 
 def _compute_intent_pack_hash(
-    *,
-    section_path: Path,
-    proposal_excerpt: Path,
-    alignment_excerpt: Path,
-    problem_frame: Path,
-    codemap_path: Path,
-    corrections_path: Path,
-    philosophy_path: Path,
-    todos_path: Path,
+    paths: PathRegistry,
+    section: Section,
     incoming_notes: str,
 ) -> str:
     """Compute a combined hash over all intent pack input files.
@@ -86,15 +70,16 @@ def _compute_intent_pack_hash(
     Used for V3/R59 hash-based invalidation — regenerate pack when
     any upstream input changes.
     """
+    sec = section.number
     parts = [
-        _sha256_file(section_path),
-        _sha256_file(proposal_excerpt),
-        _sha256_file(alignment_excerpt),
-        _sha256_file(problem_frame),
-        _sha256_file(codemap_path),
-        _sha256_file(corrections_path),
-        _sha256_file(philosophy_path),
-        _sha256_file(todos_path),
+        _sha256_file(section.path),
+        _sha256_file(paths.proposal_excerpt(sec)),
+        _sha256_file(paths.alignment_excerpt(sec)),
+        _sha256_file(paths.problem_frame(sec)),
+        _sha256_file(paths.codemap()),
+        _sha256_file(paths.corrections()),
+        _sha256_file(paths.philosophy()),
+        _sha256_file(paths.todos(sec)),
         Services.hasher().content_hash(incoming_notes),
     ]
     combined = ":".join(parts)
@@ -205,10 +190,11 @@ def _compose_intent_pack_text(
     notes_block: str,
     problem_path: Path,
     rubric_path: Path,
-    philosophy_excerpt_path: Path,
-    surface_registry_path: Path,
+    intent_sec: Path,
 ) -> str:
     """Return the intent pack generation prompt text."""
+    philosophy_excerpt_path = intent_sec / "philosophy-excerpt.md"
+    surface_registry_path = intent_sec / "surface-registry.json"
     return f"""# Task: Generate Intent Pack for Section {sec}
 
 ## Files to Read
@@ -304,8 +290,7 @@ def _build_intent_pack_prompt(
         notes_block=notes_block,
         problem_path=problem_path,
         rubric_path=rubric_path,
-        philosophy_excerpt_path=intent_sec / "philosophy-excerpt.md",
-        surface_registry_path=intent_sec / "surface-registry.json",
+        intent_sec=intent_sec,
     )
 
 
@@ -330,17 +315,7 @@ def generate_intent_pack(
     problem_path = intent_sec / "problem.md"
     rubric_path = intent_sec / "problem-alignment.md"
 
-    input_hash = _compute_intent_pack_hash(
-        section_path=section.path,
-        proposal_excerpt=paths.proposal_excerpt(sec),
-        alignment_excerpt=paths.alignment_excerpt(sec),
-        problem_frame=paths.problem_frame(sec),
-        codemap_path=paths.codemap(),
-        corrections_path=paths.corrections(),
-        philosophy_path=paths.philosophy(),
-        todos_path=paths.todos(sec),
-        incoming_notes=incoming_notes,
-    )
+    input_hash = _compute_intent_pack_hash(paths, section, incoming_notes)
     hash_file = intent_sec / "intent-pack-input-hash.txt"
 
     freshness = _check_pack_freshness(problem_path, rubric_path, input_hash, hash_file, sec)
@@ -367,7 +342,7 @@ def generate_intent_pack(
         codespace=codespace, section_number=sec,
         agent_file=Services.task_router().agent_for("intent.pack_generator"),
     )
-    if result == "ALIGNMENT_CHANGED_PENDING":
+    if result == ALIGNMENT_CHANGED_PENDING:
         return intent_sec
 
     registry_path = intent_sec / "surface-registry.json"

@@ -19,6 +19,7 @@ from intent.service.surface_registry import (
     save_surface_registry,
 )
 from proposal.service.expansion_handler import run_aligned_expansion, run_misaligned_expansion
+from signals.types import ACTION_ABORT, ACTION_CONTINUE
 
 
 DEFINITION_GAP_KINDS = {
@@ -70,7 +71,7 @@ def _persist_surfaces(section_number: str, planspace: Path, surfaces: dict) -> d
 
 
 def _write_intent_escalation_signal(
-    paths: PathRegistry,
+    planspace: Path,
     section_number: str,
     reason: str,
     surface_count: int,
@@ -81,6 +82,7 @@ def _write_intent_escalation_signal(
         "reason": reason,
         "surface_count": surface_count,
     }
+    paths = PathRegistry(planspace)
     Services.artifact_io().write_json(
         paths.intent_escalation_signal(section_number),
         escalation_signal,
@@ -96,7 +98,6 @@ def handle_aligned_surfaces(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
     intent_mode: str,
     intent_budgets: dict,
     expansion_counts: dict[str, int],
@@ -119,13 +120,13 @@ def handle_aligned_surfaces(
                 "full intent"
             )
             _write_intent_escalation_signal(
-                paths,
+                planspace,
                 section_number,
                 "structured_surfaces_on_lightweight",
                 surface_count,
             )
             return (
-                "continue",
+                ACTION_CONTINUE,
                 "full",
                 "Lightweight section discovered structured surfaces; "
                 "re-propose under full intent mode.",
@@ -134,14 +135,13 @@ def handle_aligned_surfaces(
         if intent_mode == "full":
             action = run_aligned_expansion(
                 section_number, planspace, codespace, parent,
-                intent_budgets, expansion_counts, surfaces,
-                surface_count,
+                intent_budgets, expansion_counts,
             )
             if action is None:
-                return "abort", intent_mode, None
-            if action == "continue":
+                return ACTION_ABORT, intent_mode, None
+            if action == ACTION_CONTINUE:
                 return (
-                    "continue",
+                    ACTION_CONTINUE,
                     intent_mode,
                     "Intent expanded; re-propose against "
                     "updated problem/philosophy definitions.",
@@ -161,7 +161,6 @@ def handle_misaligned_surfaces(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
     intent_mode: str,
     intent_budgets: dict,
     expansion_counts: dict[str, int],
@@ -193,7 +192,7 @@ def handle_misaligned_surfaces(
             "misaligned pass — upgrading to full"
         )
         _write_intent_escalation_signal(
-            paths,
+            planspace,
             section_number,
             "structured_surfaces_on_lightweight_misaligned",
             misaligned_surface_count,

@@ -19,7 +19,8 @@ from signals.service.blocker_manager import (
     _update_blocker_rollup,
 )
 from orchestrator.types import ProposalPassResult
-from flow.types.routing import submit_task
+from flow.types.routing import Task, submit_task
+from signals.types import PASS_MODE_PROPOSAL, SIGNAL_NEEDS_PARENT, SIGNAL_NEED_DECISION
 
 _CANDIDATE_HASH_LENGTH = 8
 _TRIGGER_HASH_LENGTH = 12
@@ -44,7 +45,7 @@ def _emit_needs_parent_research_signals(
     """Emit one needs_parent signal per blocking research question."""
     for i, question in enumerate(research_questions):
         research_signal = {
-            "state": "needs_parent",
+            "state": SIGNAL_NEEDS_PARENT,
             "section": section_number,
             "detail": question,
             "needs": needs,
@@ -173,12 +174,14 @@ def _route_blocking_research(
     freshness = Services.freshness().compute(planspace, section_number)
     task_id = submit_task(
         registry.run_db(),
-        f"readiness-{section_number}",
-        "research.plan",
-        concern_scope=f"section-{section_number}",
-        payload_path=str(prompt_path),
-        problem_id=f"research-{section_number}",
-        freshness_token=freshness,
+        Task(
+            task_type="research.plan",
+            submitted_by=f"readiness-{section_number}",
+            concern_scope=f"section-{section_number}",
+            payload_path=str(prompt_path),
+            problem_id=f"research-{section_number}",
+            freshness_token=freshness,
+        ),
     )
     Services.logger().log(
         f"Section {section_number}: dispatched research_plan "
@@ -192,7 +195,7 @@ def _route_user_root_questions(
     """Emit NEED_DECISION signals for user-root questions."""
     for i, question in enumerate(proposal_state.get("user_root_questions", [])):
         q_signal = {
-            "state": "need_decision",
+            "state": SIGNAL_NEED_DECISION,
             "section": section_number,
             "detail": str(question),
             "needs": "User/parent decision on this question",
@@ -229,7 +232,7 @@ def _route_shared_seams(
         )
 
         seam_signal = {
-            "state": "needs_parent",
+            "state": SIGNAL_NEEDS_PARENT,
             "section": section_number,
             "detail": (
                 "Shared seam candidate requires cross-section "
@@ -273,11 +276,9 @@ def route_blockers(
     section_number: str,
     proposal_state: dict,
     planspace: Path,
-    parent: str,
     codespace: Path | None = None,
 ) -> None:
     """Route proposal blockers to their downstream consumers."""
-    del parent
     registry = PathRegistry(planspace)
     signal_dir = registry.signals_dir()
     signal_dir.mkdir(parents=True, exist_ok=True)
@@ -362,12 +363,11 @@ def resolve_and_route(
             section.number,
             proposal_state,
             planspace,
-            parent,
             codespace=codespace,
         )
 
         proposal_pass_result = None
-        if pass_mode == "proposal":
+        if pass_mode == PASS_MODE_PROPOSAL:
             proposal_pass_result = _build_proposal_pass_result(
                 section.number, str(proposal_state_path), proposal_state,
                 execution_ready=False, blockers=blockers,
@@ -379,7 +379,7 @@ def resolve_and_route(
         )
 
     proposal_pass_result = None
-    if pass_mode == "proposal":
+    if pass_mode == PASS_MODE_PROPOSAL:
         Services.logger().log(
             f"Section {section.number}: proposal pass complete — "
             f"execution_ready=true, deferring implementation"

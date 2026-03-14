@@ -12,12 +12,13 @@ from risk.types import (
     RiskPlan,
     StepDecision,
 )
+from signals.types import SIGNAL_NEEDS_PARENT
 
 _RISK_ITERATIONS_BASE = 5
 _RISK_ITERATIONS_CAP = 9
 
 
-def _unique_strings(values: list[str]) -> list[str]:
+def unique_strings(values: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for value in values:
@@ -54,7 +55,7 @@ def write_accepted_steps(
     payload = {
         "accepted_steps": list(risk_plan.accepted_frontier),
         "posture": posture.value,
-        "mitigations": _unique_strings(
+        "mitigations": unique_strings(
             [
                 mitigation
                 for decision in accepted
@@ -86,14 +87,14 @@ def write_deferred_steps(
     ]
     payload = {
         "deferred_steps": list(risk_plan.deferred_steps),
-        "wait_for": _unique_strings(
+        "wait_for": unique_strings(
             [
                 item
                 for decision in deferred
                 for item in decision.wait_for
             ]
         ),
-        "reassessment_inputs": _unique_strings(
+        "reassessment_inputs": unique_strings(
             list(risk_plan.expected_reassessment_inputs),
         ),
     }
@@ -127,7 +128,7 @@ def write_reopen_blocker(
         "coordination",
     )
     payload = {
-        "state": "needs_parent",
+        "state": SIGNAL_NEEDS_PARENT,
         "blocker_type": "risk_reopen",
         "source": "roal",
         "section": sec_num,
@@ -150,7 +151,7 @@ def write_risk_review_failure_blocker(
 ) -> Path:
     paths = PathRegistry(planspace)
     payload = {
-        "state": "needs_parent",
+        "state": SIGNAL_NEEDS_PARENT,
         "blocker_type": "risk_review_failure",
         "source": "roal",
         "section": sec_num,
@@ -233,7 +234,7 @@ def load_risk_hints(planspace: Path, sec_num: str) -> dict:
             "triage_confidence": "low",
             "risk_mode_hint": "",
             "posture_floor": None,
-            "max_iterations": 5,
+            "max_iterations": _RISK_ITERATIONS_BASE,
         }
 
     triage_confidence = str(

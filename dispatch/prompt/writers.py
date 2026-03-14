@@ -40,7 +40,7 @@ def _write_prompt(
     template_name: str,
     prompt_filename: str,
     log_label: str,
-    context_builder: Callable[[Section, Path, Path, PathRegistry], dict],
+    context_builder: Callable[[Section, Path, Path], dict],
     sidecar_agent: str | None = None,
 ) -> Path | None:
     """Render, validate, and write a prompt file.
@@ -68,7 +68,7 @@ def _write_prompt(
     artifacts = paths.artifacts
 
     ctx = build_prompt_context(section, planspace, codespace)
-    ctx.update(context_builder(section, planspace, codespace, paths))
+    ctx.update(context_builder(section, planspace, codespace))
 
     # Materialize sidecar BEFORE rendering so it exists at prompt-write time
     sidecar_path = None
@@ -120,8 +120,8 @@ def write_section_setup_prompt(
         section: Section,
         planspace: Path,
         codespace: Path,
-        paths: PathRegistry,
     ) -> dict:
+        paths = PathRegistry(planspace)
         sections_dir = paths.sections_dir()
         sections_dir.mkdir(parents=True, exist_ok=True)
         sec = section.number
@@ -156,7 +156,6 @@ def write_integration_proposal_prompt(
     codespace: Path,
     alignment_problems: str | None = None,
     incoming_notes: str | None = None,
-    model_policy: dict | None = None,
 ) -> Path:
     """Write the prompt for creating an integration proposal."""
 
@@ -164,8 +163,8 @@ def write_integration_proposal_prompt(
         section: Section,
         planspace: Path,
         codespace: Path,
-        paths: PathRegistry,
     ) -> dict:
+        paths = PathRegistry(planspace)
         proposals_dir = paths.proposals_dir()
         proposals_dir.mkdir(parents=True, exist_ok=True)
         sec = section.number
@@ -245,8 +244,8 @@ def write_integration_alignment_prompt(
         section: Section,
         planspace: Path,
         codespace: Path,
-        paths: PathRegistry,
     ) -> dict:
+        paths = PathRegistry(planspace)
         sec = section.number
 
         # Intent surfaces output path (for intent-judge in full mode).
@@ -355,7 +354,6 @@ def write_strategic_impl_prompt(
     planspace: Path,
     codespace: Path,
     alignment_problems: str | None = None,
-    model_policy: dict | None = None,
 ) -> Path:
     """Write the prompt for strategic implementation."""
 
@@ -363,8 +361,8 @@ def write_strategic_impl_prompt(
         section: Section,
         planspace: Path,
         codespace: Path,
-        paths: PathRegistry,
     ) -> dict:
+        paths = PathRegistry(planspace)
         sec = section.number
         a_name = f"impl-{sec}"
         m_name = f"{a_name}-monitor"
@@ -496,8 +494,8 @@ def write_impl_alignment_prompt(
         section: Section,
         planspace: Path,
         codespace: Path,
-        paths: PathRegistry,
     ) -> dict:
+        paths = PathRegistry(planspace)
         sec = section.number
         all_paths = set(section.related_files) | set(
             Services.section_alignment().collect_modified_files(planspace, section, codespace)

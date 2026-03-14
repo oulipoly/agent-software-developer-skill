@@ -10,6 +10,8 @@ from signals.service.blocker_manager import (
     _append_open_problem,
     _update_blocker_rollup,
 )
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from signals.types import ACTION_CONTINUE, SIGNAL_NEEDS_PARENT, SIGNAL_OUT_OF_SCOPE, TRUNCATE_DETAIL
 
 
 def _write_scope_delta(
@@ -23,7 +25,7 @@ def _write_scope_delta(
     scope_delta = {
         "delta_id": f"delta-{section_number}-setup-oos",
         "section": section_number,
-        "signal": "out_of_scope",
+        "signal": SIGNAL_OUT_OF_SCOPE,
         "detail": detail,
         "requires_root_reframing": True,
         "signal_path": str(setup_sig_path),
@@ -37,17 +39,18 @@ def _write_scope_delta(
 
 def _handle_setup_signal(
     signal: str, detail: str, planspace: Path, parent: str,
-    section_number: str, paths: PathRegistry, signal_dir: Path,
+    section_number: str,
 ) -> str | None:
     """Handle a setup agent signal. Returns None to abort, 'continue' to retry."""
-    if signal in ("needs_parent", "out_of_scope"):
+    if signal in (SIGNAL_NEEDS_PARENT, SIGNAL_OUT_OF_SCOPE):
         _append_open_problem(planspace, section_number, detail, signal)
         Services.communicator().mailbox_send(
             planspace, parent,
-            f"open-problem:{section_number}:{signal}:{detail[:200]}",
+            f"open-problem:{section_number}:{signal}:{detail[:TRUNCATE_DETAIL]}",
         )
-    if signal == "out_of_scope":
-        _write_scope_delta(paths, signal_dir, section_number, detail)
+    if signal == SIGNAL_OUT_OF_SCOPE:
+        paths = PathRegistry(planspace)
+        _write_scope_delta(paths, paths.signals_dir(), section_number, detail)
     _update_blocker_rollup(planspace)
     response = Services.pipeline_control().pause_for_parent(
         planspace, parent,
@@ -60,7 +63,7 @@ def _handle_setup_signal(
         Services.cross_section().persist_decision(planspace, section_number, payload)
     if Services.pipeline_control().alignment_changed_pending(planspace):
         return None
-    return "continue"
+    return ACTION_CONTINUE
 
 
 def extract_excerpts(
@@ -92,7 +95,7 @@ def extract_excerpts(
             codespace=codespace, section_number=section.number,
             agent_file=Services.task_router().agent_for("proposal.section_setup"),
         )
-        if output == "ALIGNMENT_CHANGED_PENDING":
+        if output == ALIGNMENT_CHANGED_PENDING:
             return None
         Services.communicator().mailbox_send(
             planspace, parent,
@@ -100,15 +103,12 @@ def extract_excerpts(
         )
 
         signal, detail = Services.dispatch_helpers().check_agent_signals(
-            output,
             signal_path=signal_dir / f"setup-{section.number}-signal.json",
-            output_path=setup_output,
-            planspace=planspace, parent=parent, codespace=codespace,
         )
         if signal:
             result = _handle_setup_signal(
                 signal, detail, planspace, parent,
-                section.number, paths, signal_dir,
+                section.number,
             )
             if result is None:
                 return None

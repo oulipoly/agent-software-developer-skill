@@ -15,6 +15,32 @@ from signals.service.blocker_manager import (
     _append_open_problem,
     _update_blocker_rollup,
 )
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from signals.types import (
+    ACTION_ABORT, ACTION_CONTINUE,
+    SIGNAL_NEEDS_PARENT, SIGNAL_OUT_OF_SCOPE,
+    TRUNCATE_DETAIL,
+)
+
+
+def handle_pause_response(
+    planspace: Path,
+    section_number: str,
+    response: str,
+) -> str:
+    """Process a pause_for_parent response and return an action.
+
+    Returns ``ACTION_ABORT`` if the parent rejected or alignment changed,
+    ``ACTION_CONTINUE`` otherwise.  Persists any payload decision.
+    """
+    if not response.startswith("resume"):
+        return ACTION_ABORT
+    payload = response.partition(":")[2].strip()
+    if payload:
+        Services.cross_section().persist_decision(planspace, section_number, payload)
+    if Services.pipeline_control().alignment_changed_pending(planspace):
+        return ACTION_ABORT
+    return ACTION_CONTINUE
 
 
 def check_early_abort(
@@ -26,7 +52,7 @@ def check_early_abort(
 
     Returns True if the loop should abort (caller returns None).
     """
-    if Services.pipeline_control().handle_pending_messages(planspace, [], set()):
+    if Services.pipeline_control().handle_pending_messages(planspace):
         Services.communicator().mailbox_send(planspace, parent, f"fail:{section_number}:aborted")
         return True
 
@@ -46,7 +72,6 @@ def check_budget_exceeded(
     parent: str,
     proposal_attempt: int,
     cycle_budget: dict,
-    paths: PathRegistry,
     cycle_budget_path: Path,
 ) -> bool | None:
     """Handle proposal cycle budget exhaustion.
@@ -71,7 +96,7 @@ def check_budget_exceeded(
         "escalate": True,
     }
     budget_signal_path = (
-        paths.signals_dir()
+        PathRegistry(planspace).signals_dir()
         / f"section-{section_number}-proposal-budget-exhausted.json"
     )
     Services.artifact_io().write_json(budget_signal_path, budget_signal)
@@ -101,13 +126,13 @@ def dispatch_proposal(
     parent: str,
     proposal_model: str,
     intg_prompt: Path,
-    paths: PathRegistry,
     integration_proposal: Path,
 ) -> str | None:
     """Dispatch the proposal agent, handle timeout, send summary, and ingest.
 
     Returns the dispatch result string, or None if the caller should abort.
     """
+    paths = PathRegistry(planspace)
     intg_output = paths.artifacts / f"intg-proposal-{section_number}-output.md"
     intg_agent = f"intg-proposal-{section_number}"
     intg_result = Services.dispatcher().dispatch(
@@ -121,7 +146,7 @@ def dispatch_proposal(
         section_number=section_number,
         agent_file=Services.task_router().agent_for("proposal.integration"),
     )
-    if intg_result == "ALIGNMENT_CHANGED_PENDING":
+    if intg_result == ALIGNMENT_CHANGED_PENDING:
         return None
     Services.communicator().mailbox_send(
         planspace,
@@ -143,7 +168,6 @@ def dispatch_proposal(
 
     Services.flow_ingestion().ingest_and_submit(
         planspace,
-        db_path=paths.run_db(),
         submitted_by=f"proposal-{section_number}",
         signal_path=paths.task_request_signal("proposal", section_number),
         origin_refs=[str(integration_proposal)],
@@ -156,9 +180,6 @@ def handle_proposal_signals(
     section_number: str,
     planspace: Path,
     parent: str,
-    codespace: Path,
-    intg_result: str,
-    paths: PathRegistry,
 ) -> str | None:
     """Check agent signals after proposal dispatch.
 
@@ -167,27 +188,22 @@ def handle_proposal_signals(
         "abort" — caller should return None
         None — no signal, proceed normally
     """
-    intg_output = paths.artifacts / f"intg-proposal-{section_number}-output.md"
+    paths = PathRegistry(planspace)
     paths.signals_dir().mkdir(parents=True, exist_ok=True)
     signal, detail = Services.dispatch_helpers().check_agent_signals(
-        intg_result,
         signal_path=paths.proposal_signal(section_number),
-        output_path=intg_output,
-        planspace=planspace,
-        parent=parent,
-        codespace=codespace,
     )
     if not signal:
         return None
 
-    if signal in ("needs_parent", "out_of_scope"):
+    if signal in (SIGNAL_NEEDS_PARENT, SIGNAL_OUT_OF_SCOPE):
         _append_open_problem(planspace, section_number, detail, signal)
         Services.communicator().mailbox_send(
             planspace,
             parent,
-            f"open-problem:{section_number}:{signal}:{detail[:200]}",
+            f"open-problem:{section_number}:{signal}:{detail[:TRUNCATE_DETAIL]}",
         )
-    if signal == "out_of_scope":
+    if signal == SIGNAL_OUT_OF_SCOPE:
         scope_delta_dir = paths.scope_deltas_dir()
         scope_delta_dir.mkdir(parents=True, exist_ok=True)
         proposal_sig_path = paths.proposal_signal(section_number)
@@ -195,7 +211,7 @@ def handle_proposal_signals(
         scope_delta = {
             "delta_id": f"delta-{section_number}-proposal-oos",
             "section": section_number,
-            "signal": "out_of_scope",
+            "signal": SIGNAL_OUT_OF_SCOPE,
             "detail": detail,
             "requires_root_reframing": True,
             "signal_path": str(proposal_sig_path),
@@ -211,11 +227,4 @@ def handle_proposal_signals(
         parent,
         f"pause:{signal}:{section_number}:{detail}",
     )
-    if not response.startswith("resume"):
-        return "abort"
-    payload = response.partition(":")[2].strip()
-    if payload:
-        Services.cross_section().persist_decision(planspace, section_number, payload)
-    if Services.pipeline_control().alignment_changed_pending(planspace):
-        return "abort"
-    return "continue"
+    return handle_pause_response(planspace, section_number, response)

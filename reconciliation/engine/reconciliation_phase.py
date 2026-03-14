@@ -9,6 +9,7 @@ from containers import Services
 from reconciliation.engine.cross_section_reconciler import run_reconciliation_loop
 from implementation.engine.section_pipeline import run_section
 from orchestrator.types import ProposalPassResult, Section
+from signals.types import PASS_MODE_PROPOSAL
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def _run_reproposal_loop(
     parent: str,
 ) -> bool:
     for sec_num in reproposal_sections:
-        if Services.pipeline_control().handle_pending_messages(planspace, [], set()):
+        if Services.pipeline_control().handle_pending_messages(planspace):
             Services.logger().log("Aborted by parent during re-proposal pass")
             Services.communicator().mailbox_send(planspace, parent, "fail:aborted")
             raise ReconciliationPhaseExit
@@ -89,7 +90,7 @@ def _run_reproposal_loop(
             section,
             parent,
             all_sections=all_sections,
-            pass_mode="proposal",
+            pass_mode=PASS_MODE_PROPOSAL,
         )
 
         if Services.pipeline_control().check_alignment_and_return(

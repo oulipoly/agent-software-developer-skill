@@ -12,11 +12,12 @@ _SECTION_RE = re.compile(r"(?:section[-_]?)(\d{2})\b|[-_:](\d{2})(?:[-_.:,\s]|$)
 # Timestamps above this magnitude are assumed to be in milliseconds, not seconds
 _EPOCH_MS_MAGNITUDE_THRESHOLD = 1e12
 _PROMPT_SIGNATURE_TRUNCATION = 4000
+_DEFAULT_SUMMARIZE_LIMIT = 160
+_ELLIPSIS_LENGTH = 3
 
 
-def parse_timestamp(value: str | int | float, *, assume_tz: str = "UTC") -> tuple[str, int]:
+def parse_timestamp(value: str | int | float) -> tuple[str, int]:
     """Normalize a timestamp to ``(iso_str, epoch_ms)``."""
-    del assume_tz
     if isinstance(value, (int, float)):
         if value > _EPOCH_MS_MAGNITUDE_THRESHOLD:
             ms = int(value)
@@ -68,12 +69,12 @@ def infer_section(*texts: str) -> str:
     return ""
 
 
-def summarize_text(text: str, limit: int = 160) -> str:
+def summarize_text(text: str, limit: int = _DEFAULT_SUMMARIZE_LIMIT) -> str:
     """One-line summary truncated to *limit* chars."""
     line = " ".join(text.split())
     if len(line) <= limit:
         return line
-    return line[: limit - 3] + "..."
+    return line[: limit - _ELLIPSIS_LENGTH] + "..."
 
 
 def _fmt(dt: datetime) -> str:

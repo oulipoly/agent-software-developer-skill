@@ -9,7 +9,7 @@ grounding validator.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,174 +17,56 @@ from containers import Services
 from orchestrator.path_registry import PathRegistry
 
 from intent.service.philosophy_classifier import (
+    SOURCE_MODE_NONE,
+    SOURCE_MODE_REPO,
+    SOURCE_MODE_USER,
+    STATE_VALID_EMPTY,
+    STATE_VALID_NONEMPTY,
     _classify_distiller_result,
     _classify_guidance_result,
     _classify_selector_result,
     _classify_verifier_result,
-    _invalid_source_map_detail,
     _manifest_source_mode,
     _user_source_is_substantive,
 )
 from intent.service.philosophy_catalog import (
-    _declared_principle_ids,
     build_philosophy_catalog,
+)
+from intent.service.philosophy_grounding import (
+    sha256_file,
+    validate_philosophy_grounding,
+)
+from intent.service.philosophy_bootstrap_state import (
+    bootstrap_decisions_path as _bootstrap_decisions_path,
+    bootstrap_guidance_path as _bootstrap_guidance_path,
+    bootstrap_result as _bootstrap_result,
+    block_bootstrap as _block_bootstrap,
+    clear_bootstrap_signal as _clear_bootstrap_signal,
+    user_source_path as _user_source_path,
+    write_bootstrap_diagnostics as _write_bootstrap_diagnostics,
+    write_bootstrap_status as _write_bootstrap_status,
 )
 from intent.service.philosophy_dispatcher import (
     _attempt_output_path,
     _dispatch_classified_signal_stage,
 )
+from intent.service.philosophy_prompts import (
+    compose_bootstrap_guidance_text as _compose_bootstrap_guidance_text,
+    compose_distiller_text as _compose_distiller_text,
+    compose_source_selector_text as _compose_source_selector_text,
+    compose_verify_sources_text as _compose_verify_sources_text,
+)
+from pipeline.context import DispatchContext
+from dispatch.types import ALIGNMENT_CHANGED_PENDING
+from signals.types import BLOCKING_NEEDS_PARENT, BLOCKING_NEED_DECISION, SIGNAL_NEEDS_PARENT, SIGNAL_NEED_DECISION
 
-# ── constants ─────────────────────────────────────────────────────────
-
-BOOTSTRAP_SIGNAL_NAME = "philosophy-bootstrap-signal.json"
-BOOTSTRAP_STATUS_NAME = "philosophy-bootstrap-status.json"
-BOOTSTRAP_GUIDANCE_NAME = "philosophy-bootstrap-guidance.json"
-BOOTSTRAP_DECISIONS_NAME = "philosophy-bootstrap-decisions.md"
-USER_SOURCE_NAME = "philosophy-source-user.md"
-
-
-# ── time helpers ──────────────────────────────────────────────────────
-
-def _timestamp_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ── path helpers ──────────────────────────────────────────────────────
-
-def _bootstrap_signal_path(paths: PathRegistry) -> Path:
-    return paths.signals_dir() / BOOTSTRAP_SIGNAL_NAME
-
-
-def _bootstrap_status_path(paths: PathRegistry) -> Path:
-    return paths.intent_global_dir() / BOOTSTRAP_STATUS_NAME
-
-
-def _bootstrap_diagnostics_path(paths: PathRegistry) -> Path:
-    return paths.intent_global_dir() / "philosophy-bootstrap-diagnostics.json"
-
-
-def _bootstrap_guidance_path(paths: PathRegistry) -> Path:
-    return paths.intent_global_dir() / BOOTSTRAP_GUIDANCE_NAME
-
-
-def _bootstrap_decisions_path(paths: PathRegistry) -> Path:
-    return paths.intent_global_dir() / BOOTSTRAP_DECISIONS_NAME
-
-
-def _user_source_path(paths: PathRegistry) -> Path:
-    return paths.intent_global_dir() / USER_SOURCE_NAME
-
-
-# ── signal / status writers ───────────────────────────────────────────
-
-def _clear_bootstrap_signal(paths: PathRegistry) -> None:
-    _bootstrap_signal_path(paths).unlink(missing_ok=True)
-
-
-def _write_bootstrap_status(
-    paths: PathRegistry,
-    *,
-    bootstrap_state: str,
-    blocking_state: str | None,
-    source_mode: str,
-    detail: str,
-) -> None:
-    signal_path = _bootstrap_signal_path(paths)
-    Services.artifact_io().write_json(_bootstrap_status_path(paths), {
-        "bootstrap_state": bootstrap_state,
-        "blocking_state": blocking_state,
-        "source_mode": source_mode,
-        "detail": detail,
-        "active_signal": str(signal_path) if signal_path.exists() else None,
-        "updated_at": _timestamp_now(),
-    })
-
-
-def _write_bootstrap_signal(
-    paths: PathRegistry,
-    *,
-    state: str,
-    detail: str,
-    needs: str,
-    why_blocked: str,
-    extras: dict[str, Any] | None = None,
-) -> None:
-    payload: dict[str, Any] = {
-        "section": "global",
-        "state": state,
-        "detail": detail,
-        "needs": needs,
-        "why_blocked": why_blocked,
-    }
-    if extras:
-        payload.update(extras)
-    Services.artifact_io().write_json(_bootstrap_signal_path(paths), payload)
-
-
-def _bootstrap_result(
-    *,
-    status: str,
-    blocking_state: str | None,
-    philosophy_path: Path | None,
-    detail: str,
-) -> dict[str, Any]:
-    return {
-        "status": status,
-        "blocking_state": blocking_state,
-        "philosophy_path": philosophy_path,
-        "detail": detail,
-    }
-
-
-def _block_bootstrap(
-    paths: PathRegistry,
-    *,
-    status: str,
-    bootstrap_state: str,
-    blocking_state: str,
-    source_mode: str,
-    detail: str,
-    needs: str,
-    why_blocked: str,
-    philosophy_path: Path | None = None,
-    extras: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    _write_bootstrap_signal(
-        paths,
-        state=blocking_state,
-        detail=detail,
-        needs=needs,
-        why_blocked=why_blocked,
-        extras=extras,
-    )
-    _write_bootstrap_status(
-        paths,
-        bootstrap_state=bootstrap_state,
-        blocking_state=blocking_state,
-        source_mode=source_mode,
-        detail=detail,
-    )
-    return _bootstrap_result(
-        status=status,
-        blocking_state=blocking_state,
-        philosophy_path=philosophy_path,
-        detail=detail,
-    )
-
-
-def _write_bootstrap_diagnostics(
-    paths: PathRegistry,
-    *,
-    stage: str,
-    attempts: list[dict[str, Any]],
-    final_outcome: str,
-) -> None:
-    Services.artifact_io().write_json(_bootstrap_diagnostics_path(paths), {
-        "stage": stage,
-        "attempts": attempts,
-        "final_outcome": final_outcome,
-        "updated_at": _timestamp_now(),
-    })
+_MAX_SECTION_SPECS = 12
+_MAX_PROPOSALS = 6
+_MAX_DECISIONS = 6
+_MAX_NOTES = 6
+_MAX_FILE_EXTENSION_LENGTH = 6
+_MAX_DISTILLER_ATTEMPTS = 2
+_MAX_README_FILES_PER_DIR = 2
 
 
 # ── context collection ────────────────────────────────────────────────
@@ -192,7 +74,6 @@ def _write_bootstrap_diagnostics(
 def _collect_bootstrap_context_artifacts(
     planspace: Path,
     codespace: Path,
-    paths: PathRegistry,
 ) -> list[tuple[str, Path]]:
     context: list[tuple[str, Path]] = []
     seen: set[Path] = set()
@@ -206,11 +87,12 @@ def _collect_bootstrap_context_artifacts(
         seen.add(resolved)
         context.append((label, candidate))
 
+    paths = PathRegistry(planspace)
     for readme_root, label_prefix in (
         (codespace, "repo_readme"),
         (planspace, "planspace_readme"),
     ):
-        for candidate in sorted(readme_root.glob("[Rr][Ee][Aa][Dd][Mm][Ee]*.md"))[:2]:
+        for candidate in sorted(readme_root.glob("[Rr][Ee][Aa][Dd][Mm][Ee]*.md"))[:_MAX_README_FILES_PER_DIR]:
             add(label_prefix, candidate)
 
     add("project_mode", paths.project_mode_txt())
@@ -218,19 +100,19 @@ def _collect_bootstrap_context_artifacts(
     add("codemap", paths.codemap())
 
     sections_dir = paths.sections_dir()
-    for section_spec in sorted(sections_dir.glob("section-*.md"))[:12]:
+    for section_spec in sorted(sections_dir.glob("section-*.md"))[:_MAX_SECTION_SPECS]:
         add("section_spec", section_spec)
 
     proposals_dir = paths.proposals_dir()
-    for proposal in sorted(proposals_dir.glob("section-*-integration-proposal.md"))[:6]:
+    for proposal in sorted(proposals_dir.glob("section-*-integration-proposal.md"))[:_MAX_PROPOSALS]:
         add("proposal", proposal)
 
     decisions_dir = paths.decisions_dir()
-    for decision in sorted(decisions_dir.glob("*.md"))[:6]:
+    for decision in sorted(decisions_dir.glob("*.md"))[:_MAX_DECISIONS]:
         add("decision", decision)
 
     notes_dir = paths.notes_dir()
-    for note in sorted(notes_dir.glob("*.md"))[:6]:
+    for note in sorted(notes_dir.glob("*.md"))[:_MAX_NOTES]:
         add("note", note)
 
     return context
@@ -242,13 +124,12 @@ def _run_bootstrap_prompter(
     planspace: Path,
     codespace: Path,
     parent: str,
-    paths: PathRegistry,
 ) -> dict[str, Any] | None:
+    paths = PathRegistry(planspace)
     policy = Services.policies().load(planspace)
     context_artifacts = _collect_bootstrap_context_artifacts(
         planspace,
         codespace,
-        paths,
     )
     if not context_artifacts:
         Services.logger().log("Intent bootstrap: no project-shaping artifacts available for "
@@ -262,47 +143,7 @@ def _run_bootstrap_prompter(
         f"- `{artifact}` ({label})"
         for label, artifact in context_artifacts
     )
-    prompt_text = f"""# Task: Generate Optional Philosophy Bootstrap Guidance
-
-## Context
-The repository bootstrap confirmed that no authoritative philosophy
-source is currently usable. The user must provide philosophy input in
-their own words. Your job is to surface project-shaped tensions that may
-help the user articulate that philosophy.
-
-## Available Project-Shaping Artifacts
-{artifacts_block}
-
-Read only what you need. Guidance must be shaped by these artifacts,
-not by generic software doctrine.
-
-## Output
-Write JSON to: `{guidance_path}`
-
-```json
-{{
-  "project_frame": "Brief summary of the project context relevant to philosophy",
-  "prompts": [
-    {{
-      "prompt": "How should the system handle uncertainty in this project?",
-      "why_this_matters": "Project materials suggest risk around acting before certainty."
-    }}
-  ],
-  "notes": [
-    "These prompts are optional guidance, not required categories.",
-    "Write philosophy in any form — prose, bullets, fragments, examples."
-  ]
-}}
-```
-
-## Rules
-- Do NOT decide the philosophy for the user
-- Do NOT require a fixed response shape
-- Prefer 2-6 prompts that surface likely tensions specific to this project
-- Focus on reasoning principles, tradeoffs, authority boundaries, uncertainty handling, escalation, and scope doctrine
-- Avoid implementation tactics, framework choices, and feature requirements
-- If the artifacts do not support meaningful project-shaped prompts, write an empty `prompts` list and explain the context in `project_frame`
-"""
+    prompt_text = _compose_bootstrap_guidance_text(artifacts_block, guidance_path)
     if not Services.prompt_guard().write_validated(prompt_text, prompt_path):
         Services.logger().log("Intent bootstrap: bootstrap guidance prompt validation failed "
             "— continuing without optional guidance")
@@ -319,11 +160,11 @@ Write JSON to: `{guidance_path}`
         codespace=codespace,
         agent_file=Services.task_router().agent_for("intent.philosophy_bootstrap"),
     )
-    if result == "ALIGNMENT_CHANGED_PENDING":
+    if result == ALIGNMENT_CHANGED_PENDING:
         return None
 
     classification = _classify_guidance_result(guidance_path)
-    if classification["state"] == "valid_nonempty":
+    if classification["state"] == STATE_VALID_NONEMPTY:
         return classification["data"]
 
     Services.logger().log("Intent bootstrap: optional bootstrap guidance produced "
@@ -412,24 +253,21 @@ def _write_bootstrap_decisions(
 
 
 def _request_user_philosophy(
-    paths: PathRegistry,
     *,
-    planspace: Path,
-    codespace: Path,
-    parent: str,
+    ctx: DispatchContext,
     detail: str,
     needs: str,
     why_blocked: str,
     signal_detail: str | None = None,
-    source_mode: str = "none",
+    source_mode: str = SOURCE_MODE_NONE,
     extras: dict[str, Any] | None = None,
     overwrite_decisions: bool = True,
 ) -> dict[str, Any]:
+    paths = PathRegistry(ctx.planspace)
     guidance = _run_bootstrap_prompter(
-        planspace,
-        codespace,
-        parent,
-        paths,
+        ctx.planspace,
+        ctx.codespace,
+        ctx.parent,
     )
     user_source = _write_user_source_template(paths)
     decisions_path = _write_bootstrap_decisions(
@@ -448,9 +286,8 @@ def _request_user_philosophy(
         )
     return _block_bootstrap(
         paths,
-        status="needs_user_input",
         bootstrap_state="needs_user_input",
-        blocking_state="NEED_DECISION",
+        blocking_state=BLOCKING_NEED_DECISION,
         source_mode=source_mode,
         detail=signal_detail or detail,
         needs=needs,
@@ -459,335 +296,131 @@ def _request_user_philosophy(
     )
 
 
-# ── grounding validation ──────────────────────────────────────────────
-
-def _grounding_failure_source_mode(
-    paths: PathRegistry,
-    source_map: dict[str, Any] | None,
-) -> str:
-    """Infer the correct source_mode for grounding failure metadata."""
-    if isinstance(source_map, dict) and source_map:
-        source_types = {
-            entry.get("source_type")
-            for entry in source_map.values()
-            if isinstance(entry, dict)
-        }
-        if source_types == {"user_source"}:
-            return "user_source"
-        if source_types:
-            return "repo_sources"
-
-    status = Services.artifact_io().read_json(_bootstrap_status_path(paths))
-    if isinstance(status, dict):
-        mode = status.get("source_mode")
-        if mode in {"user_source", "repo_sources"}:
-            return mode
-
-    return "repo_sources"
+# ── bootstrap context ─────────────────────────────────────────────────
 
 
-def sha256_file(path: Path) -> str:
-    """Return hex sha256 of file contents, or empty string on error."""
-    return Services.hasher().file_hash(path)
+@dataclass
+class _BootstrapContext:
+    """Shared state threaded through bootstrap phases."""
+
+    planspace: Path
+    codespace: Path
+    parent: str
+    paths: PathRegistry
+    policy: Any
+    intent_global: Path
+    philosophy_path: Path
+    catalog: list[dict[str, Any]] = field(default_factory=list)
+    source_mode: str = SOURCE_MODE_NONE
+    source_records: list[dict[str, Any]] | None = None
+    selected: dict[str, Any] | None = None
+    selector_models: list[str] = field(default_factory=list)
+    sources: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _check_source_map_available(
-    source_map_path: Path,
-) -> tuple[str, dict[str, Any] | None] | None:
-    """Check if source_map_path exists and is non-empty.
-
-    Returns ``(detail, extras)`` on failure, or ``None`` to proceed.
-    """
-    if not source_map_path.exists() or source_map_path.stat().st_size == 0:
-        return (
-            "Philosophy source map is missing or empty. Distilled philosophy "
-            "cannot be verified as grounded. Section execution will be "
-            "blocked until philosophy is available.",
-            {},
-        )
-    return None
+# ── bootstrap phases ─────────────────────────────────────────────────
 
 
-def _validate_source_map_content(
-    source_map_path: Path,
-    philosophy_path: Path,
-    paths: PathRegistry,
-) -> tuple[str, dict[str, Any] | None, str] | None:
-    """Read and validate source map content.
-
-    Checks that the source map is a valid dict, validates its schema,
-    verifies principle mapping, and checks for stale sources.
-
-    Returns ``(detail, extras, failure_source_mode)`` on failure, or
-    ``None`` if all valid.  When *detail* is empty the caller should
-    return ``False`` without writing any signal or status (this covers
-    the case where the philosophy file itself is unreadable).
-    """
-    source_map = Services.artifact_io().read_json(source_map_path)
-    if source_map is None:
-        Services.logger().log("Intent bootstrap: malformed source map — "
-            "preserving as .malformed.json")
-        return (
-            "Philosophy source map is malformed. Section execution will "
-            "be blocked until philosophy is available.",
-            {},
-            "repo_sources",
-        )
-    if not isinstance(source_map, dict):
-        return (
-            "Philosophy source map is not a JSON object. Section "
-            "execution will be blocked until philosophy is available.",
-            {},
-            "repo_sources",
-        )
-
-    failure_source_mode = _grounding_failure_source_mode(paths, source_map)
-
-    try:
-        philosophy_text = philosophy_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ("", None, failure_source_mode)
-
-    principle_ids = _declared_principle_ids(philosophy_text)
-    if not principle_ids:
+def _check_philosophy_freshness(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Return 'ready' result if philosophy exists and inputs are unchanged."""
+    if not ctx.philosophy_path.exists() or ctx.philosophy_path.stat().st_size == 0:
         return None
 
-    map_keys = set(source_map.keys())
-    unmapped = principle_ids - map_keys
-    schema_error = _invalid_source_map_detail(source_map)
-    if schema_error is not None:
-        return (
-            "Philosophy source map has invalid entries "
-            f"({schema_error}). Section execution will be blocked "
-            "until philosophy is available.",
-            {},
-            failure_source_mode,
-        )
-    if unmapped:
-        return (
-            f"Principle IDs missing from source map: "
-            f"{sorted(unmapped)}. Distilled philosophy may contain "
-            f"invented principles. Section execution will be blocked.",
-            {
-                "unmapped_principles": sorted(unmapped),
-                "total_principles": len(principle_ids),
-                "mapped_principles": len(principle_ids - unmapped),
-            },
-            failure_source_mode,
-        )
+    source_map_path = ctx.intent_global / "philosophy-source-map.json"
+    if not source_map_path.exists():
+        Services.logger().log("Intent bootstrap: philosophy exists but source-map "
+            "missing — regenerating (fail-closed)")
+        return None
 
-    # Verify that each source_file in the map still exists.
-    stale_sources = [
-        entry.get("source_file", "")
-        for entry in source_map.values()
-        if isinstance(entry, dict)
-        and not Path(entry.get("source_file", "")).exists()
-    ]
-    if stale_sources:
-        return (
-            f"Source map references {len(stale_sources)} file(s) "
-            f"that no longer exist on disk: {stale_sources[:5]}. "
-            "Philosophy must be re-distilled from current sources.",
-            {"stale_source_files": stale_sources},
-            failure_source_mode,
-        )
-
-    return None
-
-
-def validate_philosophy_grounding(
-    philosophy_path: Path,
-    source_map_path: Path,
-    artifacts: Path,
-) -> bool:
-    """Validate that distilled philosophy is grounded in source files."""
-    paths = PathRegistry(artifacts.parent)
-
-    available_failure = _check_source_map_available(source_map_path)
-    if available_failure is not None:
-        detail, extras = available_failure
-        _write_bootstrap_signal(
-            paths,
-            state="NEEDS_PARENT",
-            detail=detail,
-            needs=(
-                "Repair the philosophy bootstrap artifacts so each principle "
-                "is grounded in a valid source map."
-            ),
-            why_blocked=(
-                "The distilled philosophy cannot be trusted until its source "
-                "map is valid and complete."
-            ),
-            extras=extras,
-        )
+    manifest_path = ctx.intent_global / "philosophy-source-manifest.json"
+    if not manifest_path.exists():
+        _clear_bootstrap_signal(ctx.paths)
+        ready_detail = "Operational philosophy already exists."
         _write_bootstrap_status(
-            paths,
-            bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode="repo_sources",
-            detail=detail,
+            ctx.paths,
+            bootstrap_state="ready",
+            blocking_state=None,
+            source_mode=SOURCE_MODE_REPO,
+            detail=ready_detail,
         )
-        return False
+        return _bootstrap_result(
+            status="ready",
+            blocking_state=None,
+            philosophy_path=ctx.philosophy_path,
+            detail=ready_detail,
+        )
 
-    content_failure = _validate_source_map_content(
-        source_map_path, philosophy_path, paths,
+    manifest = Services.artifact_io().read_json(manifest_path)
+    if not isinstance(manifest, dict):
+        Services.logger().log("Intent bootstrap: source manifest malformed — "
+            "regenerating philosophy")
+        return None
+
+    sources_changed = any(
+        not Path(entry.get("path", "")).exists()
+        or sha256_file(Path(entry.get("path", ""))) != entry.get("hash", "")
+        for entry in manifest.get("sources", [])
     )
-    if content_failure is not None:
-        detail, extras, failure_source_mode = content_failure
-        if not detail:
-            return False
-        _write_bootstrap_signal(
-            paths,
-            state="NEEDS_PARENT",
-            detail=detail,
-            needs=(
-                "Repair the philosophy bootstrap artifacts so each principle "
-                "is grounded in a valid source map."
-            ),
-            why_blocked=(
-                "The distilled philosophy cannot be trusted until its source "
-                "map is valid and complete."
-            ),
-            extras=extras,
+
+    catalog_fp_path = ctx.intent_global / "philosophy-catalog-fingerprint.txt"
+    catalog_changed = False
+    if catalog_fp_path.exists():
+        prev_fp = catalog_fp_path.read_text(encoding="utf-8").strip()
+        current_catalog = build_philosophy_catalog(ctx.planspace, ctx.codespace)
+        current_fp = Services.hasher().content_hash(
+            json.dumps(current_catalog, sort_keys=True),
         )
-        _write_bootstrap_status(
-            paths,
-            bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode=failure_source_mode,
-            detail=detail,
-        )
-        return False
+        if prev_fp != current_fp:
+            catalog_changed = True
+            Services.logger().log("Intent bootstrap: philosophy candidate "
+                "catalog changed — rerunning selector")
 
-    return True
+    if sources_changed:
+        Services.logger().log("Intent bootstrap: philosophy sources "
+            "changed — regenerating")
+        return None
+    if catalog_changed:
+        return None
 
-
-# ── main orchestration ────────────────────────────────────────────────
-
-def ensure_global_philosophy(
-    planspace: Path,
-    codespace: Path,
-    parent: str,
-) -> dict[str, Any]:
-    """Ensure the operational philosophy exists; distill if missing."""
-    policy = Services.policies().load(planspace)
-    paths = PathRegistry(planspace)
-    intent_global = paths.intent_global_dir()
-    intent_global.mkdir(parents=True, exist_ok=True)
-    philosophy_path = paths.philosophy()
-    user_source = _user_source_path(paths)
+    _clear_bootstrap_signal(ctx.paths)
+    ready_detail = "Operational philosophy is ready and source inputs are unchanged."
+    source_mode = _manifest_source_mode(manifest)
     _write_bootstrap_status(
-        paths,
-        bootstrap_state="discovering",
+        ctx.paths,
+        bootstrap_state="ready",
         blocking_state=None,
-        source_mode="none",
-        detail="Discovering philosophy sources for bootstrap.",
+        source_mode=source_mode,
+        detail=ready_detail,
+    )
+    return _bootstrap_result(
+        status="ready",
+        blocking_state=None,
+        philosophy_path=ctx.philosophy_path,
+        detail=ready_detail,
     )
 
-    if philosophy_path.exists() and philosophy_path.stat().st_size > 0:
-        source_map_path = intent_global / "philosophy-source-map.json"
-        if not source_map_path.exists():
-            Services.logger().log("Intent bootstrap: philosophy exists but source-map "
-                "missing — regenerating (fail-closed)")
-        else:
-            manifest_path = intent_global / "philosophy-source-manifest.json"
-            if manifest_path.exists():
-                manifest = Services.artifact_io().read_json(manifest_path)
-                if isinstance(manifest, dict):
-                    sources_changed = False
-                    for entry in manifest.get("sources", []):
-                        src = Path(entry.get("path", ""))
-                        if not src.exists():
-                            sources_changed = True
-                            break
-                        if sha256_file(src) != entry.get("hash", ""):
-                            sources_changed = True
-                            break
 
-                    catalog_fp_path = (
-                        intent_global / "philosophy-catalog-fingerprint.txt"
-                    )
-                    catalog_changed = False
-                    if catalog_fp_path.exists():
-                        prev_fp = catalog_fp_path.read_text(
-                            encoding="utf-8",
-                        ).strip()
-                        current_catalog = build_philosophy_catalog(
-                            planspace, codespace,
-                        )
-                        current_fp = Services.hasher().content_hash(
-                            json.dumps(current_catalog, sort_keys=True),
-                        )
-                        if prev_fp != current_fp:
-                            catalog_changed = True
-                            Services.logger().log("Intent bootstrap: philosophy candidate "
-                                "catalog changed — rerunning selector")
-
-                    if sources_changed:
-                        Services.logger().log("Intent bootstrap: philosophy sources "
-                            "changed — regenerating")
-                    elif not catalog_changed:
-                        _clear_bootstrap_signal(paths)
-                        ready_detail = (
-                            "Operational philosophy is ready and source "
-                            "inputs are unchanged."
-                        )
-                        source_mode = _manifest_source_mode(manifest)
-                        _write_bootstrap_status(
-                            paths,
-                            bootstrap_state="ready",
-                            blocking_state=None,
-                            source_mode=source_mode,
-                            detail=ready_detail,
-                        )
-                        return _bootstrap_result(
-                            status="ready",
-                            blocking_state=None,
-                            philosophy_path=philosophy_path,
-                            detail=ready_detail,
-                        )
-                else:
-                    Services.logger().log("Intent bootstrap: source manifest malformed — "
-                        "regenerating philosophy")
-            else:
-                _clear_bootstrap_signal(paths)
-                ready_detail = "Operational philosophy already exists."
-                _write_bootstrap_status(
-                    paths,
-                    bootstrap_state="ready",
-                    blocking_state=None,
-                    source_mode="repo_sources",
-                    detail=ready_detail,
-                )
-                return _bootstrap_result(
-                    status="ready",
-                    blocking_state=None,
-                    philosophy_path=philosophy_path,
-                    detail=ready_detail,
-                )
-
-    source_records: list[dict[str, Any]] | None = None
-    source_mode = "none"
+def _resolve_source_records(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Detect user source or build catalog; set ctx.source_records/mode/catalog."""
+    user_source = _user_source_path(ctx.paths)
     if _user_source_is_substantive(user_source):
-        source_records = [{
+        ctx.source_records = [{
             "path": str(user_source),
             "reason": "user-provided philosophy bootstrap input",
             "source_type": "user_source",
         }]
-        source_mode = "user_source"
+        ctx.source_mode = SOURCE_MODE_USER
 
-    catalog = build_philosophy_catalog(planspace, codespace)
-    catalog_path = paths.philosophy_candidate_catalog()
-    Services.artifact_io().write_json(catalog_path, catalog)
-    if source_records is None and not catalog:
+    ctx.catalog = build_philosophy_catalog(ctx.planspace, ctx.codespace)
+    catalog_path = ctx.paths.philosophy_candidate_catalog()
+    Services.artifact_io().write_json(catalog_path, ctx.catalog)
+
+    if ctx.source_records is None and not ctx.catalog:
         Services.logger().log("Intent bootstrap: no markdown files found for philosophy "
             "catalog — requesting user bootstrap input")
         return _request_user_philosophy(
-            paths,
-            planspace=planspace,
-            codespace=codespace,
-            parent=parent,
-            source_mode="none",
+            ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+            source_mode=SOURCE_MODE_NONE,
             detail=(
                 "Bootstrap confirmed that the repository contains no "
                 "philosophy source material to distill. The user must provide "
@@ -807,447 +440,392 @@ def ensure_global_philosophy(
             ),
         )
 
-    _clear_bootstrap_signal(paths)
+    _clear_bootstrap_signal(ctx.paths)
     _write_bootstrap_status(
-        paths,
+        ctx.paths,
         bootstrap_state="discovering",
         blocking_state=None,
-        source_mode=source_mode,
+        source_mode=ctx.source_mode,
         detail=(
             "Using user-provided philosophy bootstrap input."
-            if source_mode == "user_source"
+            if ctx.source_mode == SOURCE_MODE_USER
             else "Scanning candidate philosophy sources from repository files."
         ),
     )
+    return None
 
-    selected: dict[str, Any] | None = None
-    if source_records is None:
-        selector_prompt = paths.philosophy_select_prompt()
-        selector_output = paths.philosophy_select_output()
-        selected_signal = paths.signals_dir() / "philosophy-selected-sources.json"
-        selected_signal.parent.mkdir(parents=True, exist_ok=True)
 
-        selector_prompt_text = f"""# Task: Select Philosophy Source Files
+def _handle_selector_empty(
+    ctx: _BootstrapContext, selector_run: dict[str, Any],
+) -> dict[str, Any]:
+    """Handle selector returning valid-empty (no philosophy files found)."""
+    Services.logger().log("Intent bootstrap: source selector found no philosophy "
+        "files in the repository catalog")
+    _write_bootstrap_diagnostics(
+        ctx.paths,
+        stage="selector",
+        attempts=selector_run["attempts"],
+        final_outcome=SIGNAL_NEED_DECISION,
+    )
+    return _request_user_philosophy(
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        source_mode=SOURCE_MODE_NONE,
+        detail=(
+            "Bootstrap confirmed that the repository catalog contains "
+            "no distillable philosophy source set. The user must "
+            "provide the initial philosophy input."
+        ),
+        signal_detail=(
+            "No repository philosophy source set was found. See "
+            "philosophy-bootstrap-decisions.md."
+        ),
+        needs=(
+            "User philosophy input in philosophy-source-user.md so the "
+            "distiller has an authorized source."
+        ),
+        why_blocked=(
+            "The repository inputs genuinely contain no usable "
+            "philosophy source set for distillation."
+        ),
+    )
 
-## Context
-Select which files from the candidate catalog contain execution
-philosophy that should be distilled into the project's operational
-philosophy.
 
-Philosophy means cross-cutting reasoning about how the system should
-think before it knows what to build: tradeoff rules, uncertainty rules,
-escalation rules, authority boundaries, exploration doctrine, scope
-doctrine, and durable strategic constraints.
-
-## Input
-Read the candidate catalog at: `{catalog_path}`
-
-Each entry includes:
-- `path`
-- `size_kb`
-- `preview_start` (first 15 lines)
-- `preview_middle` (excerpt from the middle of the file)
-- `headings` (all markdown headings found mechanically)
-
-The previews are starting points only. You MAY read candidate files
-directly before deciding. Do not use script-side heuristics; make the
-semantic decision yourself from the catalog and any file reads you do.
-
-## Selection Criteria
-- Include only files that contain cross-cutting reasoning philosophy
-- Exclude feature specs, API or schema docs, local architecture plans,
-  framework choices, coding-style notes, checklists, and file-level
-  tactics unless a specific section states durable doctrine
-- Mixed documents are allowed only when your reason cites the exact
-  philosophy-bearing section(s)
-- Prefer fewer, higher-quality sources over many marginal ones
-- Select 1-10 files maximum
-
-## Output
-Write a JSON signal to: `{selected_signal}`
-
-```json
-{{
-  "status": "selected",
-  "sources": [
-    {{"path": "...", "reason": "Tradeoffs and Escalation sections define cross-cutting decision rules"}}
-  ],
-  "ambiguous": [
-    {{"path": "...", "reason": "Preview suggests uncertainty-handling doctrine, but exact philosophy-bearing section is unclear"}}
-  ],
-  "additional_extensions": [".txt", ".rst"]
-}}
-```
-
-The ``ambiguous`` field is **optional**. Include it only when the
-catalog previews are genuinely insufficient to classify a candidate.
-All selected sources plus any ambiguous candidates will be sent for
-full-read verification. Do not nominate files you can classify from
-the catalog and direct file reads.
-
-The ``additional_extensions`` field is **optional**. Include it only
-if you believe philosophy sources may exist in non-markdown formats
-that were not included in the catalog. The catalog will be rebuilt
-with these extensions and you will be re-invoked once.
-
-If NO files contain cross-cutting reasoning philosophy, write:
-```json
-{{"status": "empty", "sources": []}}
-```
-"""
-        if not Services.prompt_guard().write_validated(selector_prompt_text, selector_prompt):
-            return _block_bootstrap(
-                paths,
-                status="failed",
-                bootstrap_state="failed",
-                blocking_state="NEEDS_PARENT",
-                source_mode="none",
-                detail=(
-                    "Philosophy source selector prompt could not be validated. "
-                    "Section execution will be blocked until bootstrap is repaired."
-                ),
-                needs="Repair the philosophy bootstrap selector prompt.",
-                why_blocked=(
-                    "Bootstrap cannot ask the selector agent to identify source "
-                    "files until the prompt is valid."
-                ),
-            )
-        Services.communicator().log_artifact(planspace, "prompt:philosophy-select")
-
-        selector_models = [
-            Services.policies().resolve(policy,"intent_philosophy_selector"),
-            Services.policies().resolve(policy,"intent_philosophy_selector"),
-            Services.policies().resolve(policy,"intent_philosophy_selector_escalation"),
-        ]
-        selector_run = _dispatch_classified_signal_stage(
-            stage_name="selector",
-            prompt_path=selector_prompt,
-            output_path=selector_output,
-            signal_path=selected_signal,
-            models=selector_models,
-            classifier=_classify_selector_result,
-            planspace=planspace,
-            parent=parent,
-            codespace=codespace,
-            agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
+def _handle_selector_failure(
+    ctx: _BootstrapContext,
+    selector_run: dict[str, Any],
+    selected_classification: dict[str, Any],
+) -> dict[str, Any]:
+    """Handle selector agent failure (malformed or missing signal)."""
+    _write_bootstrap_diagnostics(
+        ctx.paths,
+        stage="selector",
+        attempts=selector_run["attempts"],
+        final_outcome=SIGNAL_NEEDS_PARENT,
+    )
+    detail = (
+        "Philosophy source selector did not write its required signal "
+        "after retry and escalation. Section execution will be blocked "
+        "until bootstrap is repaired."
+    )
+    if selected_classification["state"] == "malformed_signal":
+        detail = (
+            "Philosophy source selector wrote a malformed signal after "
+            "retry and escalation. Section execution will be blocked "
+            "until bootstrap is repaired."
         )
-        selected_classification = selector_run["classification"]
+    extras: dict[str, Any] = {}
+    preserved = selected_classification.get("preserved")
+    if preserved:
+        extras["preserved_signal"] = preserved
+    return _block_bootstrap(
+        ctx.paths,
+        bootstrap_state="failed",
+        blocking_state=BLOCKING_NEEDS_PARENT,
+        source_mode=SOURCE_MODE_NONE,
+        detail=detail,
+        needs="Repair the philosophy source selector agent output.",
+        why_blocked=(
+            "Bootstrap cannot distinguish agent failure from an empty "
+            "repository until the selector emits a valid signal."
+        ),
+        extras=extras or None,
+    )
 
-        if selected_classification["state"] == "valid_nonempty":
-            selected = selected_classification["data"]
-            _write_bootstrap_diagnostics(
-                paths,
-                stage="selector",
-                attempts=selector_run["attempts"],
-                final_outcome="selected",
-            )
-        elif selected_classification["state"] == "valid_empty":
-            Services.logger().log("Intent bootstrap: source selector found no philosophy "
-                "files in the repository catalog")
-            _write_bootstrap_diagnostics(
-                paths,
-                stage="selector",
-                attempts=selector_run["attempts"],
-                final_outcome="need_decision",
-            )
-            return _request_user_philosophy(
-                paths,
-                planspace=planspace,
-                codespace=codespace,
-                parent=parent,
-                source_mode="none",
-                detail=(
-                    "Bootstrap confirmed that the repository catalog contains "
-                    "no distillable philosophy source set. The user must "
-                    "provide the initial philosophy input."
-                ),
-                signal_detail=(
-                    "No repository philosophy source set was found. See "
-                    "philosophy-bootstrap-decisions.md."
-                ),
-                needs=(
-                    "User philosophy input in philosophy-source-user.md so the "
-                    "distiller has an authorized source."
-                ),
-                why_blocked=(
-                    "The repository inputs genuinely contain no usable "
-                    "philosophy source set for distillation."
-                ),
-            )
-        else:
-            _write_bootstrap_diagnostics(
-                paths,
-                stage="selector",
-                attempts=selector_run["attempts"],
-                final_outcome="needs_parent",
-            )
-            detail = (
-                "Philosophy source selector did not write its required signal "
-                "after retry and escalation. Section execution will be blocked "
-                "until bootstrap is repaired."
-            )
-            if selected_classification["state"] == "malformed_signal":
-                detail = (
-                    "Philosophy source selector wrote a malformed signal after "
-                    "retry and escalation. Section execution will be blocked "
-                    "until bootstrap is repaired."
-                )
-            extras: dict[str, Any] = {}
-            preserved = selected_classification.get("preserved")
-            if preserved:
-                extras["preserved_signal"] = preserved
-            return _block_bootstrap(
-                paths,
-                status="failed",
-                bootstrap_state="failed",
-                blocking_state="NEEDS_PARENT",
-                source_mode="none",
-                detail=detail,
-                needs="Repair the philosophy source selector agent output.",
-                why_blocked=(
-                    "Bootstrap cannot distinguish agent failure from an empty "
-                    "repository until the selector emits a valid signal."
-                ),
-                extras=extras or None,
-            )
+
+def _run_source_selector(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Dispatch source selector agent or use user-provided records."""
+    if ctx.source_records is not None:
+        ctx.selected = {"sources": ctx.source_records}
+        return None
+
+    catalog_path = ctx.paths.philosophy_candidate_catalog()
+    selector_prompt = ctx.paths.philosophy_select_prompt()
+    selector_output = ctx.paths.philosophy_select_output()
+    selected_signal = ctx.paths.signals_dir() / "philosophy-selected-sources.json"
+    selected_signal.parent.mkdir(parents=True, exist_ok=True)
+
+    selector_prompt_text = _compose_source_selector_text(catalog_path, selected_signal)
+    if not Services.prompt_guard().write_validated(selector_prompt_text, selector_prompt):
+        return _block_bootstrap(
+            ctx.paths,
+            status="failed",
+            bootstrap_state="failed",
+            blocking_state=BLOCKING_NEEDS_PARENT,
+            source_mode=SOURCE_MODE_NONE,
+            detail=(
+                "Philosophy source selector prompt could not be validated. "
+                "Section execution will be blocked until bootstrap is repaired."
+            ),
+            needs="Repair the philosophy bootstrap selector prompt.",
+            why_blocked=(
+                "Bootstrap cannot ask the selector agent to identify source "
+                "files until the prompt is valid."
+            ),
+        )
+    Services.communicator().log_artifact(ctx.planspace, "prompt:philosophy-select")
+
+    ctx.selector_models = [
+        Services.policies().resolve(ctx.policy, "intent_philosophy_selector"),
+        Services.policies().resolve(ctx.policy, "intent_philosophy_selector"),
+        Services.policies().resolve(ctx.policy, "intent_philosophy_selector_escalation"),
+    ]
+    selector_run = _dispatch_classified_signal_stage(
+        stage_name="selector",
+        prompt_path=selector_prompt,
+        output_path=selector_output,
+        signal_path=selected_signal,
+        models=ctx.selector_models,
+        classifier=_classify_selector_result,
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
+    )
+    selected_classification = selector_run["classification"]
+
+    if selected_classification["state"] == STATE_VALID_NONEMPTY:
+        ctx.selected = selected_classification["data"]
+        _write_bootstrap_diagnostics(
+            ctx.paths,
+            stage="selector",
+            attempts=selector_run["attempts"],
+            final_outcome="selected",
+        )
+        return None
+
+    if selected_classification["state"] == STATE_VALID_EMPTY:
+        return _handle_selector_empty(ctx, selector_run)
+
+    return _handle_selector_failure(ctx, selector_run, selected_classification)
+
+
+_EXTENSION_CAP = 5
+
+
+def _run_extension_pass(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Rebuild catalog with additional extensions if selector requested them."""
+    if not (ctx.selected
+            and isinstance(ctx.selected.get("additional_extensions"), list)
+            and ctx.selected["additional_extensions"]
+            and ctx.selector_models):
+        return None
+
+    raw_exts = ctx.selected["additional_extensions"][:_EXTENSION_CAP]
+    extra = frozenset(
+        e for e in raw_exts
+        if isinstance(e, str) and e.startswith(".")
+        and len(e) <= _MAX_FILE_EXTENSION_LENGTH and "/" not in e and "\\" not in e
+    )
+    if not extra:
+        return None
+
+    expanded_exts = frozenset({".md"}) | extra
+    Services.logger().log(f"Intent bootstrap: selector requested extensions "
+        f"{sorted(extra)} — rebuilding catalog (one-shot)")
+    catalog_path = ctx.paths.philosophy_candidate_catalog()
+    ctx.catalog = build_philosophy_catalog(
+        ctx.planspace, ctx.codespace, extensions=expanded_exts,
+    )
+    Services.artifact_io().write_json(catalog_path, ctx.catalog)
+
+    selected_signal = ctx.paths.signals_dir() / "philosophy-selected-sources.json"
+    expanded_run = _dispatch_classified_signal_stage(
+        stage_name="selector-extension-pass",
+        prompt_path=ctx.paths.philosophy_select_prompt(),
+        output_path=ctx.paths.philosophy_select_output_extensions(),
+        signal_path=selected_signal,
+        models=ctx.selector_models,
+        classifier=_classify_selector_result,
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
+    )
+    expanded_classification = expanded_run["classification"]
+    if expanded_classification["state"] == STATE_VALID_NONEMPTY:
+        ctx.selected = expanded_classification["data"]
+    elif expanded_classification["state"] == STATE_VALID_EMPTY:
+        Services.logger().log("Intent bootstrap: extension pass found no additional "
+            "philosophy sources — keeping original selection")
     else:
-        selected = {"sources": source_records}
+        Services.logger().log("Intent bootstrap: extension pass produced "
+            f"{expanded_classification['state']} — keeping original "
+            "selection")
+    return None
 
-    expansion_cap = 5
-    if (selected and isinstance(selected.get("additional_extensions"), list)
-            and selected["additional_extensions"]):
-        raw_exts = selected["additional_extensions"][:expansion_cap]
-        extra = frozenset(
-            e for e in raw_exts
-            if isinstance(e, str) and e.startswith(".")
-            and len(e) <= 6 and "/" not in e and "\\" not in e
+
+_AMBIGUOUS_CAP = 5
+
+
+def _handle_verifier_empty(ctx: _BootstrapContext) -> dict[str, Any]:
+    """Handle verifier rejecting all shortlisted candidates."""
+    Services.logger().log("Intent bootstrap: verifier rejected all shortlisted "
+        "philosophy candidates")
+    return _request_user_philosophy(
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        source_mode=SOURCE_MODE_NONE,
+        detail=(
+            "Bootstrap confirmed that none of the repository files "
+            "survived full-read philosophy verification. The user "
+            "must provide the initial philosophy input."
+        ),
+        signal_detail=(
+            "Verified repository candidates contained no philosophy "
+            "source. See philosophy-bootstrap-decisions.md."
+        ),
+        needs=(
+            "User philosophy input in philosophy-source-user.md so the "
+            "distiller has an authorized source."
+        ),
+        why_blocked=(
+            "Bootstrap cannot distill a project philosophy when the "
+            "verified shortlist contains no philosophy sources."
+        ),
+    )
+
+
+def _handle_verifier_failure(
+    ctx: _BootstrapContext,
+    shortlisted: list[dict[str, Any]],
+    verified_classification: dict[str, Any],
+) -> dict[str, Any]:
+    """Handle verifier agent failure (malformed or missing signal)."""
+    extras: dict[str, Any] = {
+        "shortlisted_candidates": [entry["path"] for entry in shortlisted],
+    }
+    preserved = verified_classification.get("preserved")
+    if preserved:
+        extras["preserved_signal"] = preserved
+    return _block_bootstrap(
+        ctx.paths,
+        bootstrap_state="failed",
+        blocking_state=BLOCKING_NEEDS_PARENT,
+        source_mode=SOURCE_MODE_REPO,
+        detail=(
+            "Philosophy verifier did not emit a valid signal for "
+            "shortlisted sources after retry and escalation. Section "
+            "execution will be blocked until bootstrap is repaired."
+        ),
+        needs="Repair the philosophy verifier agent output.",
+        why_blocked=(
+            "Bootstrap cannot safely confirm the philosophy source set "
+            "until the verifier emits a valid signal."
+        ),
+        extras=extras,
+    )
+
+
+def _run_source_verifier(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Build shortlist from selected+ambiguous, dispatch verifier agent."""
+    shortlisted = _build_verification_shortlist(ctx)
+    if not shortlisted:
+        return None
+
+    Services.logger().log(f"Intent bootstrap: verifying {len(shortlisted)} shortlisted "
+        "philosophy candidate(s) (full-read invariant check)")
+
+    verify_prompt = ctx.paths.philosophy_verify_prompt()
+    verify_output = ctx.paths.philosophy_verify_output()
+    verify_signal = ctx.paths.signals_dir() / "philosophy-verified-sources.json"
+    verify_signal.parent.mkdir(parents=True, exist_ok=True)
+
+    candidates_block = "\n".join(
+        f"- `{entry['path']}` — {entry.get('reason', 'shortlisted')}"
+        for entry in shortlisted
+    )
+    verify_prompt_text = _compose_verify_sources_text(candidates_block, verify_signal)
+    if not Services.prompt_guard().write_validated(verify_prompt_text, verify_prompt):
+        return _block_bootstrap(
+            ctx.paths,
+            status="failed",
+            bootstrap_state="failed",
+            blocking_state=BLOCKING_NEEDS_PARENT,
+            source_mode=SOURCE_MODE_REPO,
+            detail=(
+                "Philosophy source verifier prompt could not be validated. "
+                "Section execution will be blocked until bootstrap is repaired."
+            ),
+            needs="Repair the philosophy verifier prompt.",
+            why_blocked=(
+                "Bootstrap cannot confirm shortlisted philosophy sources "
+                "until the verifier prompt is valid."
+            ),
         )
-        if extra:
-            expanded_exts = frozenset({".md"}) | extra
-            Services.logger().log(f"Intent bootstrap: selector requested extensions "
-                f"{sorted(extra)} — rebuilding catalog (one-shot)")
-            catalog = build_philosophy_catalog(
-                planspace,
-                codespace,
-                extensions=expanded_exts,
-            )
-            Services.artifact_io().write_json(catalog_path, catalog)
+    Services.communicator().log_artifact(ctx.planspace, "prompt:philosophy-verify")
 
-            expanded_run = _dispatch_classified_signal_stage(
-                stage_name="selector-extension-pass",
-                prompt_path=selector_prompt,
-                output_path=paths.philosophy_select_output_extensions(),
-                signal_path=selected_signal,
-                models=selector_models,
-                classifier=_classify_selector_result,
-                planspace=planspace,
-                parent=parent,
-                codespace=codespace,
-                agent_file=Services.task_router().agent_for("intent.philosophy_selector"),
-            )
-            expanded_classification = expanded_run["classification"]
-            if expanded_classification["state"] == "valid_nonempty":
-                selected = expanded_classification["data"]
-            elif expanded_classification["state"] == "valid_empty":
-                Services.logger().log("Intent bootstrap: extension pass found no additional "
-                    "philosophy sources — keeping original selection")
-            else:
-                Services.logger().log("Intent bootstrap: extension pass produced "
-                    f"{expanded_classification['state']} — keeping original "
-                    "selection")
+    verifier_model = Services.policies().resolve(ctx.policy, "intent_philosophy_verifier")
+    verify_run = _dispatch_classified_signal_stage(
+        stage_name="verifier",
+        prompt_path=verify_prompt,
+        output_path=verify_output,
+        signal_path=verify_signal,
+        models=[
+            verifier_model,
+            verifier_model,
+            Services.policies().resolve(ctx.policy, "intent_philosophy_selector_escalation"),
+        ],
+        classifier=_classify_verifier_result,
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        agent_file=Services.task_router().agent_for("intent.philosophy_verifier"),
+    )
+    verified_classification = verify_run["classification"]
 
-    ambiguous_cap = 5
+    if verified_classification["state"] == STATE_VALID_NONEMPTY:
+        verified = verified_classification["data"]
+        ctx.selected["sources"] = verified["verified_sources"]
+        Services.logger().log(f"Intent bootstrap: verifier confirmed "
+            f"{len(verified['verified_sources'])} philosophy source(s)")
+        return None
+
+    if verified_classification["state"] == STATE_VALID_EMPTY:
+        return _handle_verifier_empty(ctx)
+
+    return _handle_verifier_failure(ctx, shortlisted, verified_classification)
+
+
+def _build_verification_shortlist(ctx: _BootstrapContext) -> list[dict[str, Any]]:
+    """Build deduplicated shortlist from selected + ambiguous candidates."""
+    if ctx.source_mode == SOURCE_MODE_USER:
+        return []
     shortlisted: list[dict[str, Any]] = []
-    if source_mode != "user_source":
-        seen_shortlisted: set[str] = set()
-        for candidate_group, reason_fallback in (
-            (selected.get("sources", []) if isinstance(selected, dict) else [],
-             "selector shortlisted source"),
-            (selected.get("ambiguous", [])[:ambiguous_cap]
-             if isinstance(selected, dict)
-             and isinstance(selected.get("ambiguous"), list)
-             else [],
-             "selector ambiguous candidate"),
-        ):
-            for entry in candidate_group:
-                if not isinstance(entry, dict):
-                    continue
-                candidate_path = entry.get("path", "")
-                if (
-                    not isinstance(candidate_path, str)
-                    or not Path(candidate_path).exists()
-                ):
-                    continue
-                if candidate_path in seen_shortlisted:
-                    continue
-                seen_shortlisted.add(candidate_path)
-                shortlisted.append({
-                    "path": candidate_path,
-                    "reason": entry.get("reason", reason_fallback),
-                })
+    seen: set[str] = set()
+    for candidate_group, reason_fallback in (
+        (ctx.selected.get("sources", []) if isinstance(ctx.selected, dict) else [],
+         "selector shortlisted source"),
+        (ctx.selected.get("ambiguous", [])[:_AMBIGUOUS_CAP]
+         if isinstance(ctx.selected, dict)
+         and isinstance(ctx.selected.get("ambiguous"), list)
+         else [],
+         "selector ambiguous candidate"),
+    ):
+        for entry in candidate_group:
+            if not isinstance(entry, dict):
+                continue
+            candidate_path = entry.get("path", "")
+            if (
+                not isinstance(candidate_path, str)
+                or not Path(candidate_path).exists()
+            ):
+                continue
+            if candidate_path in seen:
+                continue
+            seen.add(candidate_path)
+            shortlisted.append({
+                "path": candidate_path,
+                "reason": entry.get("reason", reason_fallback),
+            })
+    return shortlisted
 
-    if shortlisted:
-        Services.logger().log(f"Intent bootstrap: verifying {len(shortlisted)} shortlisted "
-            "philosophy candidate(s) (full-read invariant check)")
-        verify_prompt = paths.philosophy_verify_prompt()
-        verify_output = paths.philosophy_verify_output()
-        verify_signal = (
-            paths.signals_dir() / "philosophy-verified-sources.json"
-        )
-        verify_signal.parent.mkdir(parents=True, exist_ok=True)
 
-        candidates_block = "\n".join(
-            f"- `{entry['path']}` — {entry.get('reason', 'shortlisted')}"
-            for entry in shortlisted
-        )
-        verify_prompt_text = f"""# Task: Verify Shortlisted Philosophy Sources
-
-## Context
-The source selector shortlisted these files as possible philosophy
-sources for a project-wide invariant. Read EACH file in full and
-confirm whether it contains execution philosophy.
-
-Philosophy means cross-cutting reasoning about how the system should
-think before it knows what to build: tradeoff rules, uncertainty rules,
-escalation rules, authority boundaries, exploration doctrine, scope
-doctrine, and durable strategic constraints.
-
-## Candidates
-{candidates_block}
-
-## Instructions
-For each candidate, read the FULL file and classify:
-- **philosophy_source**: Contains cross-cutting reasoning philosophy.
-  If mixed, cite the exact section(s) that justify inclusion.
-- **not_philosophy**: Specification, requirements, architecture plans,
-  implementation tactics, or irrelevant content without cross-cutting
-  reasoning philosophy.
-
-The verifier is authoritative. Every shortlisted file must be checked,
-even if the selector already chose it.
-
-## Output
-Write a JSON signal to: `{verify_signal}`
-
-```json
-{{{{
-  "verified_sources": [
-    {{{{"path": "...", "reason": "Tradeoffs section contains cross-cutting reasoning philosophy"}}}}
-  ],
-  "rejected": [
-    {{{{"path": "...", "reason": "Implementation plan only; no cross-cutting reasoning philosophy"}}}}
-  ]
-}}}}
-```
-"""
-        if not Services.prompt_guard().write_validated(verify_prompt_text, verify_prompt):
-            return _block_bootstrap(
-                paths,
-                status="failed",
-                bootstrap_state="failed",
-                blocking_state="NEEDS_PARENT",
-                source_mode="repo_sources",
-                detail=(
-                    "Philosophy source verifier prompt could not be validated. "
-                    "Section execution will be blocked until bootstrap is repaired."
-                ),
-                needs="Repair the philosophy verifier prompt.",
-                why_blocked=(
-                    "Bootstrap cannot confirm shortlisted philosophy sources "
-                    "until the verifier prompt is valid."
-                ),
-            )
-        Services.communicator().log_artifact(planspace, "prompt:philosophy-verify")
-
-        verifier_model = Services.policies().resolve(policy,"intent_philosophy_verifier")
-        verify_run = _dispatch_classified_signal_stage(
-            stage_name="verifier",
-            prompt_path=verify_prompt,
-            output_path=verify_output,
-            signal_path=verify_signal,
-            models=[
-                verifier_model,
-                verifier_model,
-                Services.policies().resolve(policy,"intent_philosophy_selector_escalation"),
-            ],
-            classifier=_classify_verifier_result,
-            planspace=planspace,
-            parent=parent,
-            codespace=codespace,
-            agent_file=Services.task_router().agent_for("intent.philosophy_verifier"),
-        )
-        verified_classification = verify_run["classification"]
-        if verified_classification["state"] == "valid_nonempty":
-            verified = verified_classification["data"]
-            selected["sources"] = verified["verified_sources"]
-            Services.logger().log(f"Intent bootstrap: verifier confirmed "
-                f"{len(verified['verified_sources'])} philosophy source(s)")
-        elif verified_classification["state"] == "valid_empty":
-            Services.logger().log("Intent bootstrap: verifier rejected all shortlisted "
-                "philosophy candidates")
-            return _request_user_philosophy(
-                paths,
-                planspace=planspace,
-                codespace=codespace,
-                parent=parent,
-                source_mode="none",
-                detail=(
-                    "Bootstrap confirmed that none of the repository files "
-                    "survived full-read philosophy verification. The user "
-                    "must provide the initial philosophy input."
-                ),
-                signal_detail=(
-                    "Verified repository candidates contained no philosophy "
-                    "source. See philosophy-bootstrap-decisions.md."
-                ),
-                needs=(
-                    "User philosophy input in philosophy-source-user.md so the "
-                    "distiller has an authorized source."
-                ),
-                why_blocked=(
-                    "Bootstrap cannot distill a project philosophy when the "
-                    "verified shortlist contains no philosophy sources."
-                ),
-            )
-        else:
-            extras = {
-                "shortlisted_candidates": [
-                    entry["path"] for entry in shortlisted
-                ],
-            }
-            preserved = verified_classification.get("preserved")
-            if preserved:
-                extras["preserved_signal"] = preserved
-            return _block_bootstrap(
-                paths,
-                status="failed",
-                bootstrap_state="failed",
-                blocking_state="NEEDS_PARENT",
-                source_mode="repo_sources",
-                detail=(
-                    "Philosophy verifier did not emit a valid signal for "
-                    "shortlisted sources after retry and escalation. Section "
-                    "execution will be blocked until bootstrap is repaired."
-                ),
-                needs="Repair the philosophy verifier agent output.",
-                why_blocked=(
-                    "Bootstrap cannot safely confirm the philosophy source set "
-                    "until the verifier emits a valid signal."
-                ),
-                extras=extras,
-            )
-
-    if (not isinstance(selected, dict)
-            or not isinstance(selected.get("sources"), list)
-            or not selected["sources"]):
+def _validate_selected_sources(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Validate selected dict structure and filter to existing paths."""
+    if (not isinstance(ctx.selected, dict)
+            or not isinstance(ctx.selected.get("sources"), list)
+            or not ctx.selected["sources"]):
         Services.logger().log("Intent bootstrap: selector stage ended without a usable "
             "source set — blocking section (fail-closed)")
         return _block_bootstrap(
-            paths,
+            ctx.paths,
             status="failed",
             bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode="none",
+            blocking_state=BLOCKING_NEEDS_PARENT,
+            source_mode=SOURCE_MODE_NONE,
             detail=(
                 "Philosophy bootstrap ended selector processing without a "
                 "usable source set. Section execution will be blocked until "
@@ -1261,25 +839,25 @@ Write a JSON signal to: `{verify_signal}`
         )
 
     selected_sources = [
-        source for source in selected["sources"]
+        source for source in ctx.selected["sources"]
         if isinstance(source, dict) and Path(source.get("path", "")).exists()
     ]
-    sources = [
+    ctx.sources = [
         {
             "path": Path(source["path"]),
             "source_type": source.get("source_type", "repo_source"),
         }
         for source in selected_sources
     ]
-    if not sources:
+    if not ctx.sources:
         Services.logger().log("Intent bootstrap: selected source paths do not exist — "
             "skipping distillation (fail-closed)")
         return _block_bootstrap(
-            paths,
+            ctx.paths,
             status="failed",
             bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode="none",
+            blocking_state=BLOCKING_NEEDS_PARENT,
+            source_mode=SOURCE_MODE_NONE,
             detail=(
                 "Philosophy source selector returned source paths that do "
                 "not exist. Section execution will be blocked until bootstrap "
@@ -1291,94 +869,47 @@ Write a JSON signal to: `{verify_signal}`
                 "are not present on disk."
             ),
         )
+    return None
 
+
+def _run_distiller(ctx: _BootstrapContext) -> dict[str, Any] | None:
+    """Dispatch distiller agent and handle classification results."""
     Services.logger().log(
         "Intent bootstrap: distilling operational philosophy from "
-        f"{len(sources)} "
-        f"{'user-provided' if source_mode == 'user_source' else 'selected'} "
+        f"{len(ctx.sources)} "
+        f"{'user-provided' if ctx.source_mode == 'user_source' else 'selected'} "
         "source(s)",
     )
-    _clear_bootstrap_signal(paths)
+    _clear_bootstrap_signal(ctx.paths)
     _write_bootstrap_status(
-        paths,
+        ctx.paths,
         bootstrap_state="distilling",
         blocking_state=None,
-        source_mode=source_mode if source_mode != "none" else "repo_sources",
+        source_mode=ctx.source_mode if ctx.source_mode != SOURCE_MODE_NONE else SOURCE_MODE_REPO,
         detail=(
-            f"Distilling operational philosophy from {len(sources)} "
-            f"{'user' if source_mode == 'user_source' else 'repository'} "
+            f"Distilling operational philosophy from {len(ctx.sources)} "
+            f"{'user' if ctx.source_mode == 'user_source' else 'repository'} "
             "source file(s)."
         ),
     )
 
-    prompt_path = paths.philosophy_distill_prompt()
-    output_path = paths.philosophy_distill_output()
-    source_map_path = intent_global / "philosophy-source-map.json"
+    prompt_path = ctx.paths.philosophy_distill_prompt()
+    output_path = ctx.paths.philosophy_distill_output()
+    source_map_path = ctx.intent_global / "philosophy-source-map.json"
 
-    decisions_path = _bootstrap_decisions_path(paths)
-    sources_block = "\n".join(
-        f"- `{source['path']}` (source_type: `{source['source_type']}`)"
-        for source in sources
+    distill_prompt_text = _compose_distiller_text(
+        sources=ctx.sources,
+        philosophy_path=ctx.philosophy_path,
+        source_map_path=source_map_path,
+        decisions_path=_bootstrap_decisions_path(ctx.paths),
     )
-    distill_prompt_text = f"""# Task: Distill Operational Philosophy
-
-## Context
-Convert the execution philosophy into an operational philosophy document
-that alignment agents can use for per-section philosophy checks.
-
-Philosophy means cross-cutting reasoning about how the system should
-think before it knows what to build: tradeoff rules, uncertainty rules,
-escalation rules, authority boundaries, exploration doctrine, scope
-doctrine, and durable strategic constraints.
-
-## Input
-Read these philosophy source files:
-{sources_block}
-
-If a philosophy artifact already exists at `{philosophy_path}`, skip this task.
-
-## Output
-Write an operational philosophy to: `{philosophy_path}`
-
-Structure:
-1. Numbered principles (P1, P2, ...) — short, actionable
-2. Interactions between principles (which ones tension with each other)
-3. Expansion guidance (how new principles get added)
-
-Write a source map to: `{source_map_path}`
-Format: JSON mapping principle ID to an object with `source_type`,
-`source_file`, and `source_section`.
-
-If you are reading a user-authored bootstrap source and cannot extract
-stable principles because the input is too thin, contradictory, or
-genuinely ambiguous, do NOT invent filler. Instead:
-- Rewrite `{decisions_path}` with concise follow-up clarification questions
-- Leave `{philosophy_path}` empty
-- Write `{{}}` to `{source_map_path}`
-
-## Rules
-- Extract only durable principles that apply across multiple tasks
-- Extract only principles that constrain future decisions
-- Extract only principles that are testable in alignment review
-- Exclude implementation details unless they express genuine
-  cross-cutting doctrine
-- Keep principles short and operational (1-2 sentences each)
-- Number them P1..PN for machine-stable references
-- Note known tensions between principles explicitly
-- Include expansion guidance: what classifies as absorbable vs tension vs contradiction
-- Do NOT invent principles — every principle must trace to one of the source files
-- Use `source_type: "user_source"` for user-authored bootstrap input and `source_type: "repo_source"` for repository files
-- Do NOT target a fixed count; a small real seed philosophy is acceptable
-- If the sources contain no extractable philosophy, leave
-  `{philosophy_path}` empty and write `{{}}` to `{source_map_path}`
-"""
     if not Services.prompt_guard().write_validated(distill_prompt_text, prompt_path):
         return _block_bootstrap(
-            paths,
+            ctx.paths,
             status="failed",
             bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode="repo_sources",
+            blocking_state=BLOCKING_NEEDS_PARENT,
+            source_mode=SOURCE_MODE_REPO,
             detail=(
                 "Philosophy distillation prompt could not be validated. "
                 "Section execution will be blocked until bootstrap is repaired."
@@ -1389,161 +920,181 @@ genuinely ambiguous, do NOT invent filler. Instead:
                 "distiller prompt is valid."
             ),
         )
-    Services.communicator().log_artifact(planspace, "prompt:philosophy-distill")
+    Services.communicator().log_artifact(ctx.planspace, "prompt:philosophy-distill")
 
-    distiller_model = Services.policies().resolve(policy,"intent_philosophy")
+    distiller_model = Services.policies().resolve(ctx.policy, "intent_philosophy")
     distill_classification: dict[str, Any] = {"state": "missing_signal", "data": None}
-    for attempt in (1, 2):
+    for attempt in range(1, _MAX_DISTILLER_ATTEMPTS + 1):
         result = Services.dispatcher().dispatch(
             distiller_model,
             prompt_path,
             _attempt_output_path(output_path, attempt),
-            planspace,
-            parent,
-            codespace=codespace,
+            ctx.planspace,
+            ctx.parent,
+            codespace=ctx.codespace,
             agent_file=Services.task_router().agent_for("intent.philosophy_distiller"),
         )
 
-        if result == "ALIGNMENT_CHANGED_PENDING":
-            detail = "Alignment changed while philosophy bootstrap was running."
+        if result == ALIGNMENT_CHANGED_PENDING:
             return _bootstrap_result(
                 status="ready",
                 blocking_state=None,
-                philosophy_path=philosophy_path,
-                detail=detail,
+                philosophy_path=ctx.philosophy_path,
+                detail="Alignment changed while philosophy bootstrap was running.",
             )
 
         distill_classification = _classify_distiller_result(
-            philosophy_path,
-            source_map_path,
+            ctx.philosophy_path, source_map_path,
         )
-        if distill_classification["state"] == "valid_nonempty":
+        if distill_classification["state"] == STATE_VALID_NONEMPTY:
             break
         if attempt < 2:
             Services.logger().log("Intent bootstrap: distiller produced "
                 f"{distill_classification['state']} on attempt {attempt}/2 "
                 f"— retrying with {distiller_model}")
 
-    if distill_classification["state"] != "valid_nonempty":
-        if distill_classification["state"] == "valid_empty":
-            if source_mode == "user_source":
-                Services.logger().log("Intent bootstrap: user philosophy source needs follow-up "
-                    "clarification before principles can be distilled")
-                if not decisions_path.exists() or decisions_path.stat().st_size == 0:
-                    guidance = None
-                    guidance_classification = _classify_guidance_result(
-                        _bootstrap_guidance_path(paths),
-                    )
-                    if guidance_classification["state"] == "valid_nonempty":
-                        guidance = guidance_classification["data"]
-                    _write_bootstrap_decisions(
-                        paths,
-                        detail=(
-                            "The user-provided philosophy input was not yet "
-                            "stable enough to distill into operational principles. "
-                            "Please clarify the philosophy directly in the user "
-                            "source file."
-                        ),
-                        guidance=guidance,
-                        overwrite=True,
-                    )
-                return _request_user_philosophy(
-                    paths,
-                    planspace=planspace,
-                    codespace=codespace,
-                    parent=parent,
-                    source_mode="user_source",
-                    detail=(
-                        "The user-provided philosophy input is not yet stable "
-                        "enough to distill. Please clarify it and resume."
-                    ),
-                    signal_detail=(
-                        "User philosophy input needs clarification. See "
-                        "philosophy-bootstrap-decisions.md."
-                    ),
-                    needs=(
-                        "Clarify or expand philosophy-source-user.md so stable "
-                        "cross-task reasoning principles can be extracted."
-                    ),
-                    why_blocked=(
-                        "Bootstrap cannot invent filler when user philosophy "
-                        "input is thin, contradictory, or ambiguous."
-                    ),
-                    extras={"sources": [str(source["path"]) for source in sources]},
-                    overwrite_decisions=False,
-                )
-            detail = (
-                "Verified philosophy sources contained no extractable "
-                "cross-cutting reasoning philosophy. Section execution "
-                "will be blocked until philosophy is available."
-            )
-            Services.logger().log("Intent bootstrap: distiller found no extractable "
-                "philosophy in verified sources")
-            return _request_user_philosophy(
-                paths,
-                planspace=planspace,
-                codespace=codespace,
-                parent=parent,
-                source_mode="repo_sources",
-                detail=(
-                    "Bootstrap confirmed that the available repository "
-                    "sources still do not contain extractable philosophy. "
-                    "The user must provide the initial philosophy input."
-                ),
-                signal_detail=detail,
-                needs=(
-                    "Provide philosophy input in philosophy-source-user.md so "
-                    "the distiller has an authorized source."
-                ),
-                why_blocked=(
-                    "Bootstrap cannot invent philosophy when the verified "
-                    "sources contain only implementation detail."
-                ),
-                extras={"sources": [str(source["path"]) for source in sources]},
-            )
-        detail = (
-            "Philosophy distiller did not produce the required bootstrap "
-            "artifacts despite source files being available. Section "
-            "execution will be blocked until philosophy is available."
-        )
-        if distill_classification["state"] == "malformed_signal":
-            detail = (
-                "Philosophy distiller produced a malformed source map. "
-                "Section execution will be blocked until bootstrap is "
-                "repaired."
-            )
-        Services.logger().log("Intent bootstrap: philosophy distillation failed — "
-            f"{distill_classification['state']} (fail-closed, blocking section)")
-        extras = {"sources": [str(source["path"]) for source in sources]}
-        preserved = distill_classification.get("preserved")
-        if preserved:
-            extras["preserved_signal"] = preserved
-        return _block_bootstrap(
-            paths,
-            status="failed",
-            bootstrap_state="failed",
-            blocking_state="NEEDS_PARENT",
-            source_mode="repo_sources",
-            detail=detail,
-            needs="Repair the philosophy distillation step.",
-            why_blocked=(
-                "Bootstrap cannot establish a global philosophy until the "
-                "distiller emits valid grounded artifacts."
-            ),
-            extras=extras,
-        )
+    if distill_classification["state"] == STATE_VALID_NONEMPTY:
+        return None
 
+    return _handle_distiller_failure(ctx, distill_classification)
+
+
+def _handle_distiller_empty_user_source(
+    ctx: _BootstrapContext, sources_list: list[str],
+) -> dict[str, Any]:
+    """Handle distiller empty result when source is user-provided."""
+    Services.logger().log("Intent bootstrap: user philosophy source needs follow-up "
+        "clarification before principles can be distilled")
+    decisions_path = _bootstrap_decisions_path(ctx.paths)
+    if not decisions_path.exists() or decisions_path.stat().st_size == 0:
+        guidance = None
+        guidance_classification = _classify_guidance_result(
+            _bootstrap_guidance_path(ctx.paths),
+        )
+        if guidance_classification["state"] == STATE_VALID_NONEMPTY:
+            guidance = guidance_classification["data"]
+        _write_bootstrap_decisions(
+            ctx.paths,
+            detail=(
+                "The user-provided philosophy input was not yet "
+                "stable enough to distill into operational principles. "
+                "Please clarify the philosophy directly in the user "
+                "source file."
+            ),
+            guidance=guidance,
+            overwrite=True,
+        )
+    return _request_user_philosophy(
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        source_mode=SOURCE_MODE_USER,
+        detail=(
+            "The user-provided philosophy input is not yet stable "
+            "enough to distill. Please clarify it and resume."
+        ),
+        signal_detail=(
+            "User philosophy input needs clarification. See "
+            "philosophy-bootstrap-decisions.md."
+        ),
+        needs=(
+            "Clarify or expand philosophy-source-user.md so stable "
+            "cross-task reasoning principles can be extracted."
+        ),
+        why_blocked=(
+            "Bootstrap cannot invent filler when user philosophy "
+            "input is thin, contradictory, or ambiguous."
+        ),
+        extras={"sources": sources_list},
+        overwrite_decisions=False,
+    )
+
+
+def _handle_distiller_empty_repo_source(
+    ctx: _BootstrapContext, sources_list: list[str],
+) -> dict[str, Any]:
+    """Handle distiller empty result when source is repository files."""
+    Services.logger().log("Intent bootstrap: distiller found no extractable "
+        "philosophy in verified sources")
+    return _request_user_philosophy(
+        ctx=DispatchContext(ctx.planspace, ctx.codespace, ctx.parent),
+        source_mode=SOURCE_MODE_REPO,
+        detail=(
+            "Bootstrap confirmed that the available repository "
+            "sources still do not contain extractable philosophy. "
+            "The user must provide the initial philosophy input."
+        ),
+        signal_detail=(
+            "Verified philosophy sources contained no extractable "
+            "cross-cutting reasoning philosophy. Section execution "
+            "will be blocked until philosophy is available."
+        ),
+        needs=(
+            "Provide philosophy input in philosophy-source-user.md so "
+            "the distiller has an authorized source."
+        ),
+        why_blocked=(
+            "Bootstrap cannot invent philosophy when the verified "
+            "sources contain only implementation detail."
+        ),
+        extras={"sources": sources_list},
+    )
+
+
+def _handle_distiller_failure(
+    ctx: _BootstrapContext,
+    classification: dict[str, Any],
+) -> dict[str, Any]:
+    """Map a failed distiller classification to the appropriate bootstrap result."""
+    sources_list = [str(source["path"]) for source in ctx.sources]
+
+    if classification["state"] == STATE_VALID_EMPTY:
+        if ctx.source_mode == SOURCE_MODE_USER:
+            return _handle_distiller_empty_user_source(ctx, sources_list)
+        return _handle_distiller_empty_repo_source(ctx, sources_list)
+
+    detail = (
+        "Philosophy distiller did not produce the required bootstrap "
+        "artifacts despite source files being available. Section "
+        "execution will be blocked until philosophy is available."
+    )
+    if classification["state"] == "malformed_signal":
+        detail = (
+            "Philosophy distiller produced a malformed source map. "
+            "Section execution will be blocked until bootstrap is "
+            "repaired."
+        )
+    Services.logger().log("Intent bootstrap: philosophy distillation failed — "
+        f"{classification['state']} (fail-closed, blocking section)")
+    extras: dict[str, Any] = {"sources": sources_list}
+    preserved = classification.get("preserved")
+    if preserved:
+        extras["preserved_signal"] = preserved
+    return _block_bootstrap(
+        ctx.paths,
+        bootstrap_state="failed",
+        blocking_state=BLOCKING_NEEDS_PARENT,
+        source_mode=SOURCE_MODE_REPO,
+        detail=detail,
+        needs="Repair the philosophy distillation step.",
+        why_blocked=(
+            "Bootstrap cannot establish a global philosophy until the "
+            "distiller emits valid grounded artifacts."
+        ),
+        extras=extras,
+    )
+
+
+def _finalize_philosophy(ctx: _BootstrapContext) -> dict[str, Any]:
+    """Validate grounding, write manifest and fingerprint, return result."""
+    source_map_path = ctx.intent_global / "philosophy-source-map.json"
     grounding_ok = validate_philosophy_grounding(
-        philosophy_path,
-        source_map_path,
-        paths.artifacts,
+        ctx.philosophy_path, source_map_path, ctx.paths.artifacts,
     )
     if not grounding_ok:
         Services.logger().log("Intent bootstrap: philosophy grounding validation failed "
             "— blocking section (fail-closed)")
         return _bootstrap_result(
             status="failed",
-            blocking_state="NEEDS_PARENT",
+            blocking_state=BLOCKING_NEEDS_PARENT,
             philosophy_path=None,
             detail=(
                 "Philosophy grounding validation failed. Section execution "
@@ -1551,7 +1102,7 @@ genuinely ambiguous, do NOT invent filler. Instead:
             ),
         )
 
-    manifest_path = intent_global / "philosophy-source-manifest.json"
+    manifest_path = ctx.intent_global / "philosophy-source-manifest.json"
     Services.artifact_io().write_json(manifest_path, {
         "sources": [
             {
@@ -1559,26 +1110,74 @@ genuinely ambiguous, do NOT invent filler. Instead:
                 "hash": sha256_file(source["path"]),
                 "source_type": source["source_type"],
             }
-            for source in sources
+            for source in ctx.sources
         ],
     })
 
-    catalog_fp_path = intent_global / "philosophy-catalog-fingerprint.txt"
-    catalog_fp = Services.hasher().content_hash(json.dumps(catalog, sort_keys=True))
+    catalog_fp_path = ctx.intent_global / "philosophy-catalog-fingerprint.txt"
+    catalog_fp = Services.hasher().content_hash(json.dumps(ctx.catalog, sort_keys=True))
     catalog_fp_path.write_text(catalog_fp, encoding="utf-8")
 
-    _clear_bootstrap_signal(paths)
+    _clear_bootstrap_signal(ctx.paths)
     ready_detail = "Operational philosophy distilled and validated."
     _write_bootstrap_status(
-        paths,
+        ctx.paths,
         bootstrap_state="ready",
         blocking_state=None,
-        source_mode=source_mode if source_mode != "none" else "repo_sources",
+        source_mode=ctx.source_mode if ctx.source_mode != SOURCE_MODE_NONE else SOURCE_MODE_REPO,
         detail=ready_detail,
     )
     return _bootstrap_result(
         status="ready",
         blocking_state=None,
-        philosophy_path=philosophy_path,
+        philosophy_path=ctx.philosophy_path,
         detail=ready_detail,
     )
+
+
+# ── main orchestration ────────────────────────────────────────────────
+
+
+def ensure_global_philosophy(
+    planspace: Path,
+    codespace: Path,
+    parent: str,
+) -> dict[str, Any]:
+    """Ensure the operational philosophy exists; distill if missing."""
+    policy = Services.policies().load(planspace)
+    paths = PathRegistry(planspace)
+    intent_global = paths.intent_global_dir()
+    intent_global.mkdir(parents=True, exist_ok=True)
+
+    ctx = _BootstrapContext(
+        planspace=planspace,
+        codespace=codespace,
+        parent=parent,
+        paths=paths,
+        policy=policy,
+        intent_global=intent_global,
+        philosophy_path=paths.philosophy(),
+    )
+
+    _write_bootstrap_status(
+        paths,
+        bootstrap_state="discovering",
+        blocking_state=None,
+        source_mode=SOURCE_MODE_NONE,
+        detail="Discovering philosophy sources for bootstrap.",
+    )
+
+    for phase in (
+        _check_philosophy_freshness,
+        _resolve_source_records,
+        _run_source_selector,
+        _run_extension_pass,
+        _run_source_verifier,
+        _validate_selected_sources,
+        _run_distiller,
+    ):
+        result = phase(ctx)
+        if result is not None:
+            return result
+
+    return _finalize_philosophy(ctx)

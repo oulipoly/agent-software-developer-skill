@@ -10,6 +10,7 @@ from coordination.repository.notes import read_incoming_notes as load_incoming_n
 from orchestrator.path_registry import PathRegistry
 from containers import Services
 from orchestrator.types import Section, SectionResult
+from signals.types import SIGNAL_NEEDS_PARENT
 
 
 def build_file_to_sections(sections: list[Section]) -> dict[str, list[str]]:
@@ -39,10 +40,10 @@ def _collect_blocker_and_misalignment_problems(
         if blocker_path.exists():
             blocker = Services.artifact_io().read_json(blocker_path)
             if blocker is not None:
-                if blocker.get("state") == "needs_parent":
+                if blocker.get("state") == SIGNAL_NEEDS_PARENT:
                     problems.append({
                         "section": sec_num,
-                        "type": "needs_parent",
+                        "type": SIGNAL_NEEDS_PARENT,
                         "description": blocker.get("detail", ""),
                         "needs": blocker.get("needs", ""),
                         "files": files,
@@ -51,7 +52,7 @@ def _collect_blocker_and_misalignment_problems(
             else:
                 problems.append({
                     "section": sec_num,
-                    "type": "needs_parent",
+                    "type": SIGNAL_NEEDS_PARENT,
                     "description": (
                         f"Blocker signal at {blocker_path} is malformed "
                         "or unreadable; cannot determine blocker state — "
@@ -122,12 +123,12 @@ def _classify_note_ack(
 
 
 def _collect_note_problems(
-    section_results, sections_by_num, paths, planspace,
+    section_results, sections_by_num, paths,
 ):
     problems = []
     note_entries: list[dict[str, Any]] = []
     for target_num in sorted(section_results):
-        note_entries.extend(load_incoming_notes(planspace, target_num))
+        note_entries.extend(load_incoming_notes(paths.planspace, target_num))
     for note in sorted(note_entries, key=lambda entry: entry["path"].name):
         note_path = note["path"]
         target_num = note["target"]
@@ -262,7 +263,7 @@ def _collect_outstanding_problems(
         section_results, sections_by_num, paths,
     )
     problems.extend(_collect_note_problems(
-        section_results, sections_by_num, paths, planspace,
+        section_results, sections_by_num, paths,
     ))
     problems.extend(_collect_scope_delta_problems(sections_by_num, paths))
     return problems
