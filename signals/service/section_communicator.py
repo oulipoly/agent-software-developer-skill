@@ -4,20 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _config import AGENT_NAME, DB_SH
+from containers import Services
 from signals.service.database_client import DatabaseClient
 from signals.service.mailbox_service import MailboxService
 from orchestrator.path_registry import PathRegistry
 
 
+AGENT_NAME = "section-loop"
+
+
 def log(msg: str) -> None:
     """Print a timestamped log message to stdout."""
-    print(f"[section-loop] {msg}", flush=True)
+    print(f"[{AGENT_NAME}] {msg}", flush=True)
 
 
 def _mailbox(planspace: Path) -> MailboxService:
+    cfg = Services.config()
     return MailboxService.for_planspace(
-        planspace, db_sh=DB_SH, agent_name=AGENT_NAME,
+        planspace, db_sh=cfg.db_sh, agent_name=cfg.agent_name,
     )
 
 
@@ -48,11 +52,12 @@ def mailbox_cleanup(planspace: Path) -> None:
 
 def _log_artifact(planspace: Path, name: str) -> None:
     """Log an artifact lifecycle event to the database."""
-    DatabaseClient.for_planspace(planspace, DB_SH).log_event(
+    cfg = Services.config()
+    DatabaseClient.for_planspace(planspace, cfg.db_sh).log_event(
         "lifecycle",
         f"artifact:{name}",
         "created",
-        agent=AGENT_NAME,
+        agent=cfg.agent_name,
         check=False,
     )
 
@@ -79,9 +84,9 @@ def _record_traceability(
     if state_path.exists():
         ps = load_proposal_state(state_path)
         governance = {
-            "problem_ids": ps.get("problem_ids", []),
-            "pattern_ids": ps.get("pattern_ids", []),
-            "profile_id": ps.get("profile_id", ""),
+            "problem_ids": ps.problem_ids,
+            "pattern_ids": ps.pattern_ids,
+            "profile_id": ps.profile_id,
         }
 
     entry: dict = {

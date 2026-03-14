@@ -21,14 +21,14 @@ def _proposal_governance_ids(planspace: Path, section_number: str) -> dict:
     state = load_proposal_state(state_path)
     return {
         "problem_ids": [
-            str(x) for x in state.get("problem_ids", [])
+            str(x) for x in state.problem_ids
             if isinstance(x, str) and x.strip()
         ],
         "pattern_ids": [
-            str(x) for x in state.get("pattern_ids", [])
+            str(x) for x in state.pattern_ids
             if isinstance(x, str) and x.strip()
         ],
-        "profile_id": state.get("profile_id", "") or "",
+        "profile_id": state.profile_id or "",
     }
 
 
@@ -76,8 +76,6 @@ def write_traceability_index(
 ) -> None:
     """Write a traceability index for a completed section."""
     paths = PathRegistry(planspace)
-    trace_dir = paths.trace_dir()
-    trace_dir.mkdir(parents=True, exist_ok=True)
     sec = section.number
 
     proposal_excerpt = paths.proposal_excerpt(sec)

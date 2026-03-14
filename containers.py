@@ -33,6 +33,23 @@ if TYPE_CHECKING:
 # Service classes
 # ---------------------------------------------------------------------------
 
+class ConfigService:
+    """Agent configuration constants routed through DI."""
+
+    def __init__(self) -> None:
+        from _config import AGENT_NAME, DB_SH
+        self._agent_name = AGENT_NAME
+        self._db_sh = DB_SH
+
+    @property
+    def agent_name(self) -> str:
+        return self._agent_name
+
+    @property
+    def db_sh(self):
+        return self._db_sh
+
+
 class AgentDispatcher:
     """Dispatches agents to LLM providers.
 
@@ -235,18 +252,18 @@ class LogService:
     def log_lifecycle(self, planspace, event: str, status: str) -> None:
         """Log a lifecycle event to the coordination database."""
         import subprocess
-        from _config import AGENT_NAME, DB_SH
+        cfg = Services.config()
         subprocess.run(  # noqa: S603
             [
                 "bash",
-                str(DB_SH),  # noqa: S607
+                str(cfg.db_sh),  # noqa: S607
                 "log",
                 str(planspace / "run.db"),
                 "lifecycle",
                 event,
                 status,
                 "--agent",
-                AGENT_NAME,
+                cfg.agent_name,
             ],
             capture_output=True,
             text=True,
@@ -363,6 +380,14 @@ class FlowIngestionService:
         from flow.engine.flow_submitter import submit_chain
         return submit_chain(env, steps, **kwargs)
 
+    def submit_fanout(self, env, branches, **kwargs):
+        from flow.engine.flow_submitter import submit_fanout
+        return submit_fanout(env, branches, **kwargs)
+
+    def new_flow_id(self) -> str:
+        from flow.engine.flow_submitter import new_flow_id
+        return new_flow_id()
+
 
 class StalenessDetectionService:
     """File snapshot and diff detection for implementation tracking."""
@@ -380,14 +405,14 @@ class ChangeTrackerService:
     """Alignment change flag and excerpt invalidation."""
 
     def set_flag(self, planspace) -> None:
-        from _config import AGENT_NAME, DB_SH
         from staleness.service.change_tracker import set_flag
-        set_flag(planspace, db_sh=DB_SH, agent_name=AGENT_NAME)
+        cfg = Services.config()
+        set_flag(planspace, db_sh=cfg.db_sh, agent_name=cfg.agent_name)
 
     def make_alignment_checker(self):
-        from _config import AGENT_NAME, DB_SH
         from staleness.service.change_tracker import make_alignment_checker
-        return make_alignment_checker(DB_SH, AGENT_NAME)
+        cfg = Services.config()
+        return make_alignment_checker(cfg.db_sh, cfg.agent_name)
 
     def invalidate_excerpts(self, planspace) -> None:
         from staleness.service.change_tracker import invalidate_excerpts
@@ -400,6 +425,54 @@ class FreshnessService:
     def compute(self, planspace, section_number: str) -> str:
         from staleness.service.freshness_calculator import compute_section_freshness
         return compute_section_freshness(planspace, section_number)
+
+
+class ResearchOrchestratorService:
+    """Research lifecycle: status, plan validation, execution, verification."""
+
+    def load_status(self, section_number, planspace):
+        from research.engine.orchestrator import load_research_status
+        return load_research_status(section_number, planspace)
+
+    def validate_plan(self, plan_path):
+        from research.engine.orchestrator import validate_research_plan
+        return validate_research_plan(plan_path)
+
+    def write_status(self, section_number, planspace, status, **kwargs):
+        from research.engine.orchestrator import write_research_status
+        return write_research_status(section_number, planspace, status, **kwargs)
+
+    def compute_trigger_hash(self, questions):
+        from research.engine.orchestrator import compute_trigger_hash
+        return compute_trigger_hash(questions)
+
+    def is_complete_for_trigger(self, section_number, planspace, trigger_hash):
+        from research.engine.orchestrator import is_research_complete_for_trigger
+        return is_research_complete_for_trigger(section_number, planspace, trigger_hash)
+
+    def execute_plan(self, section_number, planspace, codespace, plan_output_path):
+        from research.engine.research_plan_executor import execute_research_plan
+        return execute_research_plan(section_number, planspace, codespace, plan_output_path)
+
+    def submit_verify(self, section_number, planspace, *, db_path, declared_by_task_id, origin_refs=None):
+        from research.engine.research_plan_executor import submit_research_verify
+        return submit_research_verify(
+            section_number, planspace,
+            db_path=db_path, declared_by_task_id=declared_by_task_id,
+            origin_refs=origin_refs,
+        )
+
+
+class RiskAssessmentService:
+    """Risk assessment dispatch: lightweight checks and full ROAL loop."""
+
+    def run_lightweight_check(self, planspace, scope, layer, package, posture_floor=None):
+        from risk.engine.risk_assessor import run_lightweight_risk_check
+        return run_lightweight_risk_check(planspace, scope, layer, package, posture_floor)
+
+    def run_risk_loop(self, planspace, scope, layer, package, max_iterations=5, posture_floor=None):
+        from risk.engine.risk_assessor import run_risk_loop
+        return run_risk_loop(planspace, scope, layer, package, max_iterations, posture_floor)
 
 
 class SectionAlignmentService:
@@ -452,6 +525,7 @@ class SectionAlignmentService:
 class Services(containers.DeclarativeContainer):
     """Root container — one provider per cross-cutting service."""
 
+    config = providers.Singleton(ConfigService)
     dispatcher = providers.Singleton(AgentDispatcher)
     prompt_guard = providers.Singleton(PromptGuard)
     policies = providers.Singleton(ModelPolicyService)
@@ -469,4 +543,6 @@ class Services(containers.DeclarativeContainer):
     staleness = providers.Singleton(StalenessDetectionService)
     change_tracker = providers.Singleton(ChangeTrackerService)
     freshness = providers.Singleton(FreshnessService)
+    research = providers.Singleton(ResearchOrchestratorService)
+    risk_assessment = providers.Singleton(RiskAssessmentService)
     section_alignment = providers.Singleton(SectionAlignmentService)

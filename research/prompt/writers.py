@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from orchestrator.path_registry import PathRegistry
 from containers import Services
+from signals.types import RESEARCH_TYPE_BOTH, RESEARCH_TYPE_CODE, RESEARCH_TYPE_WEB
 
 
 def _optional_input_lines(
@@ -101,11 +103,20 @@ def write_research_plan_prompt(
     return prompt_path
 
 
+@dataclass(frozen=True)
+class TicketPaths:
+    """File paths for a research ticket."""
+
+    spec: Path
+    prompt: Path
+    result: Path
+
+
 def _prepare_ticket_spec(
     section_number: str, ticket: dict, ticket_index: int,
     paths: PathRegistry,
-) -> tuple[Path, Path, Path]:
-    """Prepare ticket spec file and return (spec_path, prompt_path, result_path)."""
+) -> TicketPaths:
+    """Prepare ticket spec file and return ticket paths."""
     phase = str(ticket.get("_phase", ""))
     spec_path = paths.research_ticket_spec(section_number, ticket_index, phase)
     prompt_path = paths.research_ticket_prompt(section_number, ticket_index, phase)
@@ -124,19 +135,19 @@ def _prepare_ticket_spec(
     ticket_payload["output_path"] = str(result_path)
     Services.artifact_io().write_json(spec_path, ticket_payload)
 
-    return spec_path, prompt_path, result_path
+    return TicketPaths(spec=spec_path, prompt=prompt_path, result=result_path)
 
 
 def _ticket_phase_note(ticket: dict) -> str:
     """Determine the execution phase note for a research ticket."""
     phase = str(ticket.get("_phase", ""))
-    if phase == "web":
+    if phase == RESEARCH_TYPE_WEB:
         return (
             "This is the web stage of a `both` ticket. Gather source-backed findings "
             "for later synthesis with scan evidence."
         )
-    research_type = str(ticket.get("research_type", "web"))
-    if research_type in {"code", "both"}:
+    research_type = str(ticket.get("research_type", RESEARCH_TYPE_WEB))
+    if research_type in {RESEARCH_TYPE_CODE, RESEARCH_TYPE_BOTH}:
         return (
             "Use codemap, codemap corrections, and scan evidence from flow context. "
             "Do not do ad hoc codebase exploration beyond the prepared evidence."
@@ -153,7 +164,7 @@ def write_research_ticket_prompt(
 ) -> Path | None:
     """Write prompt for a single research ticket."""
     paths = PathRegistry(planspace)
-    spec_path, prompt_path, result_path = _prepare_ticket_spec(
+    ticket_paths = _prepare_ticket_spec(
         section_number, ticket, ticket_index, paths,
     )
     phase_note = _ticket_phase_note(ticket)
@@ -165,7 +176,7 @@ def write_research_ticket_prompt(
         "",
         "## Inputs",
         "",
-        f"1. Ticket spec: `{spec_path}`",
+        f"1. Ticket spec: `{ticket_paths.spec}`",
     ]
 
     optional_inputs = _optional_input_lines(
@@ -188,16 +199,16 @@ def write_research_ticket_prompt(
     if codespace is not None:
         lines.extend(["", "## Codespace", "", f"`{codespace}`"])
 
-    lines.extend(["", "## Output Path", "", f"- Ticket result JSON: `{result_path}`"])
+    lines.extend(["", "## Output Path", "", f"- Ticket result JSON: `{ticket_paths.result}`"])
     if phase_note:
         lines.extend([
             "", "## Execution Notes", "", phase_note,
             "If your prompt is wrapped with `<flow-context>`, read the referenced flow context and use any previous result manifest as prepared evidence.",
         ])
 
-    if not Services.prompt_guard().write_validated("\n".join(lines), prompt_path):
+    if not Services.prompt_guard().write_validated("\n".join(lines), ticket_paths.prompt):
         return None
-    return prompt_path
+    return ticket_paths.prompt
 
 
 def write_research_synthesis_prompt(

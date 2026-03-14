@@ -114,7 +114,6 @@ def _write_contract_artifacts(
         return
 
     contracts_dir = paths.contracts_dir()
-    contracts_dir.mkdir(parents=True, exist_ok=True)
     modified_set = set(modified_files)
     target_files_map = {
         s.number: set(s.related_files) for s in all_sections
@@ -171,7 +170,7 @@ def post_section_completion(
 
     files_fingerprint = _compute_files_fingerprint(modified_files, codespace)
 
-    for target_num, reason, contract_risk, note_md in impacted_sections:
+    for target_num, reason, _contract_risk, note_md in impacted_sections:
         note_name = f"from-{sec_num}-to-{target_num}.md"
         note_id = Services.hasher().content_hash(f"{note_name}:{files_fingerprint}")[:_NOTE_HASH_LENGTH]
         note_content = _build_consequence_note(

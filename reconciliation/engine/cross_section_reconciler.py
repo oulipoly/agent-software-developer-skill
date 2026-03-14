@@ -11,12 +11,13 @@ Entry point: ``run_reconciliation_loop(run_dir, proposal_results)``.
 """
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from orchestrator.path_registry import PathRegistry
 
 from containers import Services
-from proposal.repository.state import load_proposal_state
+from proposal.repository.state import ProposalState, load_proposal_state
 from reconciliation.service.adjudicator import adjudicate_ungrouped_candidates
 from reconciliation.service.detectors import (
     aggregate_shared_seams,
@@ -26,7 +27,6 @@ from reconciliation.service.detectors import (
 )
 from reconciliation.repository.results import (
     load_result,
-    was_section_affected as repository_was_section_affected,
     write_result,
     write_scope_delta,
     write_substrate_trigger,
@@ -135,8 +135,8 @@ def _extract_section_numbers(proposal_results: list) -> list[str]:
 def _load_proposal_states(
     run_dir: Path,
     section_numbers: list[str],
-) -> dict[str, dict]:
-    states: dict[str, dict] = {}
+) -> dict[str, ProposalState]:
+    states: dict[str, ProposalState] = {}
     for sec_num in section_numbers:
         state_path = PathRegistry(run_dir).proposal_state(sec_num)
         states[sec_num] = load_proposal_state(state_path)
@@ -145,25 +145,35 @@ def _load_proposal_states(
 
 def _merge_recon_requests_into_states(
     recon_requests: list[dict],
-    states: dict[str, dict],
+    states: dict[str, ProposalState],
 ) -> None:
     for req in recon_requests:
         sec = req.get("section", "")
         if sec and sec in states:
             state = states[sec]
             for contract in req.get("unresolved_contracts", []):
-                if contract not in state.get("unresolved_contracts", []):
-                    state.setdefault("unresolved_contracts", []).append(
-                        contract)
+                if contract not in state.unresolved_contracts:
+                    state.unresolved_contracts.append(contract)
             for anchor in req.get("unresolved_anchors", []):
-                if anchor not in state.get("unresolved_anchors", []):
-                    state.setdefault("unresolved_anchors", []).append(anchor)
+                if anchor not in state.unresolved_anchors:
+                    state.unresolved_anchors.append(anchor)
+
+
+@dataclass
+class CrossSectionIssues:
+    """Detected cross-section reconciliation issues."""
+
+    anchor_overlaps: list[dict] = field(default_factory=list)
+    contract_conflicts: list[dict] = field(default_factory=list)
+    consolidated_sections: list[dict] = field(default_factory=list)
+    shared_seams: list[dict] = field(default_factory=list)
+    substrate_seams: list[dict] = field(default_factory=list)
 
 
 def _detect_cross_section_issues(
-    states: dict[str, dict],
+    states: dict[str, ProposalState],
     run_dir: Path,
-) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
+) -> CrossSectionIssues:
     anchor_overlaps = detect_anchor_overlaps(states)
     contract_conflicts = detect_contract_conflicts(states)
     consolidated_sections, ungrouped_titles = consolidate_new_section_candidates(
@@ -178,7 +188,13 @@ def _detect_cross_section_issues(
 
     substrate_seams = [s for s in shared_seams if s.get("needs_substrate")]
 
-    return anchor_overlaps, contract_conflicts, consolidated_sections, shared_seams, substrate_seams
+    return CrossSectionIssues(
+        anchor_overlaps=anchor_overlaps,
+        contract_conflicts=contract_conflicts,
+        consolidated_sections=consolidated_sections,
+        shared_seams=shared_seams,
+        substrate_seams=substrate_seams,
+    )
 
 
 def _build_section_result(
@@ -259,22 +275,6 @@ def load_reconciliation_result(
     return load_result(planspace, section_number)
 
 
-def was_section_affected(run_dir: Path, section_number: str) -> bool:
-    """Check whether reconciliation marked a section as affected.
-
-    Convenience wrapper around :func:`load_reconciliation_result` that
-    returns ``True`` when a reconciliation result artifact exists for
-    *section_number* and its ``affected`` field is truthy.
-
-    Parameters
-    ----------
-    run_dir:
-        The planspace root directory containing ``artifacts/``.
-    section_number:
-        Zero-padded section number (e.g. ``"03"``).
-    """
-    return repository_was_section_affected(run_dir, section_number)
-
 
 def run_reconciliation_loop(
     run_dir: Path,
@@ -310,32 +310,30 @@ def run_reconciliation_loop(
     )
     _merge_recon_requests_into_states(recon_requests, states)
 
-    anchor_overlaps, contract_conflicts, consolidated_sections, \
-        shared_seams, substrate_seams = _detect_cross_section_issues(
-            states, run_dir,
-        )
+    issues = _detect_cross_section_issues(states, run_dir)
 
     affected_sections = _collect_affected_sections(
-        anchor_overlaps, contract_conflicts,
-        consolidated_sections, substrate_seams,
+        issues.anchor_overlaps, issues.contract_conflicts,
+        issues.consolidated_sections, issues.substrate_seams,
     )
 
     for sec_num in section_numbers:
         result = _build_section_result(
-            sec_num, anchor_overlaps, contract_conflicts,
-            consolidated_sections, substrate_seams, affected_sections,
+            sec_num, issues.anchor_overlaps, issues.contract_conflicts,
+            issues.consolidated_sections, issues.substrate_seams,
+            affected_sections,
         )
         write_result(run_dir, sec_num, result)
 
-    for consolidated in consolidated_sections:
+    for consolidated in issues.consolidated_sections:
         write_scope_delta(run_dir, consolidated)
 
-    for seam in substrate_seams:
+    for seam in issues.substrate_seams:
         write_substrate_trigger(run_dir, seam)
 
     summary = _build_summary(
-        affected_sections, consolidated_sections, substrate_seams,
-        anchor_overlaps, contract_conflicts, shared_seams,
+        affected_sections, issues.consolidated_sections, issues.substrate_seams,
+        issues.anchor_overlaps, issues.contract_conflicts, issues.shared_seams,
     )
     logger.info("Reconciliation summary: %s", summary)
 

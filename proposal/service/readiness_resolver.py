@@ -26,6 +26,7 @@ class GovernanceBlockerState(str, Enum):
         return self.value
 from orchestrator.path_registry import PathRegistry
 from proposal.repository.state import (
+    ProposalState,
     extract_blockers,
     has_blocking_fields,
     load_proposal_state,
@@ -63,9 +64,9 @@ class ReadinessResult:
 logger = logging.getLogger(__name__)
 
 
-def _check_pattern_deviations(state: dict) -> list[dict]:
+def _check_pattern_deviations(state: ProposalState) -> list[dict]:
     """Return blockers for unresolved pattern deviations."""
-    deviations = state.get("pattern_deviations", [])
+    deviations = state.pattern_deviations
     if isinstance(deviations, list) and deviations:
         return [{
             "state": GovernanceBlockerState.DEVIATION,
@@ -80,9 +81,9 @@ def _check_pattern_deviations(state: dict) -> list[dict]:
     return []
 
 
-def _check_governance_questions(state: dict) -> list[dict]:
+def _check_governance_questions(state: ProposalState) -> list[dict]:
     """Return blockers for unresolved governance questions."""
-    questions = state.get("governance_questions", [])
+    questions = state.governance_questions
     if isinstance(questions, list) and questions:
         return [{
             "state": GovernanceBlockerState.QUESTION,
@@ -96,17 +97,25 @@ def _check_governance_questions(state: dict) -> list[dict]:
     return []
 
 
-def _validate_declared_ids_types(
-    state: dict, section_number: str,
-) -> tuple[list[str], list[str], str]:
-    """Extract and type-check declared governance IDs from *state*.
+@dataclass
+class GovernanceIds:
+    """Validated governance IDs extracted from proposal state."""
 
-    Returns ``(problem_ids, pattern_ids, profile_id)`` with safe defaults
-    when types are unexpected.
-    """
-    problem_ids = state.get("problem_ids", [])
-    pattern_ids = state.get("pattern_ids", [])
-    profile_id = state.get("profile_id", "")
+    problem_ids: list[str] = field(default_factory=list)
+    pattern_ids: list[str] = field(default_factory=list)
+    profile_id: str = ""
+
+    def has_declared_ids(self) -> bool:
+        return bool(self.problem_ids or self.pattern_ids or self.profile_id)
+
+
+def _validate_declared_ids_types(
+    state: ProposalState, section_number: str,
+) -> GovernanceIds:
+    """Extract and type-check declared governance IDs from *state*."""
+    problem_ids = state.problem_ids
+    pattern_ids = state.pattern_ids
+    profile_id = state.profile_id
     if not isinstance(problem_ids, list):
         logger.warning(
             "Section %s: problem_ids has unexpected type %s, defaulting to []",
@@ -125,17 +134,17 @@ def _validate_declared_ids_types(
             section_number, type(profile_id).__name__,
         )
         profile_id = ""
-    return problem_ids, pattern_ids, profile_id
+    return GovernanceIds(problem_ids, pattern_ids, profile_id)
 
 
-def _check_packet_ambiguity(packet: dict, state: dict) -> list[dict]:
+def _check_packet_ambiguity(packet: dict, state: ProposalState) -> list[dict]:
     """CP-3 (R107): packet ambiguity must be carried in proposal-state."""
     packet_applicability = packet.get("applicability_state", "")
     packet_questions = packet.get("governance_questions", [])
     if not isinstance(packet_questions, list):
         packet_questions = []
     if packet_applicability == "ambiguous_applicability" and packet_questions:
-        state_questions = state.get("governance_questions", [])
+        state_questions = state.governance_questions
         if not isinstance(state_questions, list):
             state_questions = []
         if not state_questions:
@@ -262,7 +271,7 @@ def _check_missing_packet(has_declared_ids: bool, packet: Any) -> list[dict]:
 
 
 def _validate_governance_identity(
-    state: dict,
+    state: ProposalState,
     planspace: Path,
     section_number: str,
 ) -> list[dict]:
@@ -283,10 +292,8 @@ def _validate_governance_identity(
     packet_path = paths.governance_packet(section_number)
     packet = Services.artifact_io().read_json(packet_path)
 
-    problem_ids, pattern_ids, profile_id = _validate_declared_ids_types(
-        state, section_number,
-    )
-    has_declared_ids = bool(problem_ids or pattern_ids or profile_id)
+    gov_ids = _validate_declared_ids_types(state, section_number)
+    has_declared_ids = gov_ids.has_declared_ids()
 
     if isinstance(packet, dict):
         blockers.extend(_check_packet_ambiguity(packet, state))
@@ -295,7 +302,7 @@ def _validate_governance_identity(
         governing_profile = packet.get("governing_profile", "")
         if not isinstance(governing_profile, str):
             governing_profile = ""
-        blockers.extend(_check_profile_mismatch(profile_id, governing_profile))
+        blockers.extend(_check_profile_mismatch(gov_ids.profile_id, governing_profile))
 
         packet_problems = packet.get("candidate_problems", [])
         packet_patterns = packet.get("candidate_patterns", [])
@@ -304,7 +311,8 @@ def _validate_governance_identity(
         if not isinstance(packet_patterns, list):
             packet_patterns = []
         blockers.extend(_check_packet_membership(
-            problem_ids, pattern_ids, packet_problems, packet_patterns,
+            gov_ids.problem_ids, gov_ids.pattern_ids,
+            packet_problems, packet_patterns,
         ))
     else:
         blockers.extend(_check_missing_packet(has_declared_ids, packet))
@@ -322,7 +330,7 @@ def resolve_readiness(planspace: Path, section_number: str) -> ReadinessResult:
     proposal_state_path = paths.proposal_state(section_number)
     state = load_proposal_state(proposal_state_path)
 
-    ready = state.get("execution_ready") is True and not has_blocking_fields(state)
+    ready = state.execution_ready is True and not has_blocking_fields(state)
     blockers = extract_blockers(state)
 
     # Validate governance identity (PAT-0013)
@@ -333,12 +341,12 @@ def resolve_readiness(planspace: Path, section_number: str) -> ReadinessResult:
         blockers.extend(governance_blockers)
         ready = False
 
-    rationale = state.get("readiness_rationale", "")
+    rationale = state.readiness_rationale
 
     if not ready and not blockers:
         if not proposal_state_path.exists():
             rationale = rationale or "proposal-state artifact missing"
-        elif not state.get("execution_ready"):
+        elif not state.execution_ready:
             rationale = rationale or "execution_ready is false"
 
     serializable: dict = {
@@ -348,7 +356,6 @@ def resolve_readiness(planspace: Path, section_number: str) -> ReadinessResult:
     }
 
     readiness_dir = paths.readiness_dir()
-    readiness_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = paths.execution_ready(section_number)
     try:
         Services.artifact_io().write_json(artifact_path, serializable)

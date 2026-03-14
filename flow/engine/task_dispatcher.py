@@ -27,7 +27,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from dispatch.repository.metadata import DISPATCH_META_CORRUPT, read_dispatch_metadata
+from dispatch.repository.metadata import DispatchMetaResult, read_dispatch_metadata
+from dispatch.types import DispatchStatus
 from orchestrator.path_registry import PathRegistry
 from flow.service.task_db_client import (
     claim_task as _db_claim_task,
@@ -56,12 +57,6 @@ DISPATCHER_NAME = "task-dispatcher"
 _DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 logger = logging.getLogger(__name__)
 
-# Sentinel returned by _read_dispatch_meta when the sidecar file exists
-# but contains malformed JSON.  Distinct from None (file absent) and
-# dict (valid parse).
-_DISPATCH_META_CORRUPT = DISPATCH_META_CORRUPT
-
-
 @dataclass(frozen=True)
 class TaskHandle:
     """Identity bundle for a claimed task — threads through dispatcher helpers."""
@@ -72,26 +67,15 @@ class TaskHandle:
     submitted_by: str
 
 
-def _read_dispatch_meta(meta_path: Path) -> dict | None | object:
-    """Read the dispatch metadata sidecar with fail-closed semantics.
-
-    Returns:
-    - ``None`` when the file does not exist (allows timeout-prefix
-      fallback to work).
-    - A ``dict`` when the file exists and contains valid JSON.
-    - ``_DISPATCH_META_CORRUPT`` when the file exists but is malformed
-      or unreadable.  The corrupt file is renamed to
-      ``.malformed.json`` for forensic preservation and a warning is
-      logged (same pattern as ``_read_flow_json`` in flow_facade.py).
-    """
-    data = read_dispatch_metadata(meta_path)
-    if data is DISPATCH_META_CORRUPT:
+def _read_dispatch_meta(meta_path: Path) -> DispatchMetaResult:
+    """Read the dispatch metadata sidecar with fail-closed semantics."""
+    result = read_dispatch_metadata(meta_path)
+    if result.is_corrupt:
         log(
             f"WARNING: Malformed dispatch meta at {meta_path} "
             f"— renaming to .malformed.json"
         )
-        return _DISPATCH_META_CORRUPT
-    return data
+    return result
 
 
 def _fail_task(h: TaskHandle, err, *,
@@ -239,7 +223,7 @@ def _finalize_task(h: TaskHandle, planspace,
     meta_path = output_path.with_suffix(".meta.json")
     meta_result = _read_dispatch_meta(meta_path)
 
-    if meta_result is _DISPATCH_META_CORRUPT:
+    if meta_result.is_corrupt:
         err = (
             "dispatch meta sidecar corrupt — "
             f"renamed to {meta_path.with_suffix('.malformed.json').name}"
@@ -253,13 +237,13 @@ def _finalize_task(h: TaskHandle, planspace,
     timed_out = False
     agent_failed = False
     rc = None
-    if isinstance(meta_result, dict):
-        timed_out = meta_result.get("timed_out", False)
-        rc = meta_result.get("returncode")
+    if meta_result.data is not None:
+        timed_out = meta_result.data.get("timed_out", False)
+        rc = meta_result.data.get("returncode")
         if rc is not None and rc != 0:
             agent_failed = True
 
-    if not timed_out and output.startswith("TIMEOUT:"):
+    if not timed_out and output.status is DispatchStatus.TIMEOUT:
         timed_out = True
 
     if timed_out:

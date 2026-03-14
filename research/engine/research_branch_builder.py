@@ -13,7 +13,13 @@ from orchestrator.path_registry import PathRegistry
 from research.prompt.writers import write_research_ticket_prompt
 from containers import Services
 from signals.service.blocker_manager import update_blocker_rollup
-from signals.types import SIGNAL_NEEDS_PARENT, SIGNAL_NEED_DECISION
+from signals.types import (
+    RESEARCH_TYPE_BOTH,
+    RESEARCH_TYPE_CODE,
+    RESEARCH_TYPE_WEB,
+    SIGNAL_NEEDS_PARENT,
+    SIGNAL_NEED_DECISION,
+)
 
 
 def ordered_ticket_ids(plan: dict) -> list[str]:
@@ -87,7 +93,7 @@ def _write_research_scan_prompt(
             "Produce focused scan evidence for the downstream research ticket; do not broaden the scope beyond the ticket questions.",
         ]
     )
-    if ticket.get("research_type") == "both":
+    if ticket.get("research_type") == RESEARCH_TYPE_BOTH:
         lines.append(
             "If flow context includes a previous result manifest from a web stage, use it as context for what must be verified against code."
         )
@@ -105,7 +111,6 @@ def emit_not_researchable_signals(
     """Route planner-declared non-researchable items into blocker signals."""
     paths = PathRegistry(planspace)
     signals_dir = paths.signals_dir()
-    signals_dir.mkdir(parents=True, exist_ok=True)
 
     for index, item in enumerate(items):
         question = str(item.get("question", "")).strip()
@@ -215,15 +220,15 @@ def _build_both_branch(
     concern_scope = f"section-{section_number}"
     problem_id = f"research-{section_number}-{ticket_id}"
     web_ticket = dict(ticket)
-    web_ticket["research_type"] = "web"
+    web_ticket["research_type"] = RESEARCH_TYPE_WEB
     web_ticket["output_path"] = str(
         PathRegistry(planspace).research_ticket_result(
             section_number,
             ticket_index,
-            "web",
+            RESEARCH_TYPE_WEB,
         )
     )
-    web_ticket["_phase"] = "web"
+    web_ticket["_phase"] = RESEARCH_TYPE_WEB
     web_prompt = write_research_ticket_prompt(
         section_number,
         planspace,
@@ -281,17 +286,17 @@ def build_branch(
     ticket_index: int,
 ) -> BranchSpec | None:
     """Translate one semantic ticket into a concrete branch spec."""
-    research_type = str(ticket.get("research_type", "web"))
+    research_type = str(ticket.get("research_type", RESEARCH_TYPE_WEB))
 
     args = (section_number, planspace, codespace, ticket, ticket_index)
 
-    if research_type == "web":
+    if research_type == RESEARCH_TYPE_WEB:
         return _build_web_branch(*args)
 
-    if research_type == "code":
+    if research_type == RESEARCH_TYPE_CODE:
         return _build_code_branch(*args)
 
-    if research_type == "both":
+    if research_type == RESEARCH_TYPE_BOTH:
         return _build_both_branch(*args)
 
     return None

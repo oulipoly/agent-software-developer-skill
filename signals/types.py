@@ -28,8 +28,25 @@ ALIGNMENT_INVALID_FRAME = "INVALID_FRAME"
 
 # ── pass mode constants (section pipeline) ───────────────────────────
 
+PASS_MODE_FULL = "full"
 PASS_MODE_PROPOSAL = "proposal"
 PASS_MODE_IMPLEMENTATION = "implementation"
+
+# ── intent mode constants ────────────────────────────────────────────
+
+INTENT_MODE_FULL = "full"
+INTENT_MODE_LIGHTWEIGHT = "lightweight"
+INTENT_MODE_CACHED = "cached"
+
+# ── research type constants ──────────────────────────────────────────
+
+RESEARCH_TYPE_WEB = "web"
+RESEARCH_TYPE_CODE = "code"
+RESEARCH_TYPE_BOTH = "both"
+
+# ── mailbox protocol prefix ──────────────────────────────────────────
+
+RESUME_PREFIX = "resume"
 
 # ── display truncation limits ────────────────────────────────────────
 

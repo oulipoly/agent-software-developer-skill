@@ -7,6 +7,7 @@ from the main proposal loop orchestration.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from containers import Services
@@ -19,7 +20,7 @@ from intent.service.surface_registry import (
     save_surface_registry,
 )
 from proposal.service.expansion_handler import run_aligned_expansion, run_misaligned_expansion
-from signals.types import ACTION_ABORT, ACTION_CONTINUE
+from signals.types import ACTION_ABORT, ACTION_CONTINUE, INTENT_MODE_FULL
 
 
 DEFINITION_GAP_KINDS = {
@@ -89,6 +90,15 @@ def _write_intent_escalation_signal(
     )
 
 
+@dataclass(frozen=True)
+class SurfaceActionResult:
+    """Result of aligned/misaligned surface handling."""
+
+    action: str
+    intent_mode: str
+    reproposal_reason: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Surface action handlers (aligned / misaligned paths)
 # ---------------------------------------------------------------------------
@@ -101,10 +111,10 @@ def handle_aligned_surfaces(
     intent_mode: str,
     intent_budgets: dict,
     expansion_counts: dict[str, int],
-) -> tuple[str, str, str | None]:
+) -> SurfaceActionResult:
     """Handle surface processing when the proposal is aligned.
 
-    Returns (action, updated_intent_mode, reproposal_reason) where action is:
+    Returns a ``SurfaceActionResult`` with action:
         "break" — alignment accepted, exit loop
         "continue" — re-propose needed (reproposal_reason has the message)
         "abort" — caller should return None
@@ -112,7 +122,7 @@ def handle_aligned_surfaces(
     surfaces = _load_combined_surfaces(section_number, planspace)
     surface_count = _count_surfaces(surfaces)
     if surface_count:
-        if intent_mode != "full":
+        if intent_mode != INTENT_MODE_FULL:
             _persist_surfaces(section_number, planspace, surfaces)
             Services.logger().log(
                 f"Section {section_number}: lightweight mode discovered "
@@ -125,26 +135,30 @@ def handle_aligned_surfaces(
                 "structured_surfaces_on_lightweight",
                 surface_count,
             )
-            return (
-                ACTION_CONTINUE,
-                "full",
-                "Lightweight section discovered structured surfaces; "
-                "re-propose under full intent mode.",
+            return SurfaceActionResult(
+                action=ACTION_CONTINUE,
+                intent_mode=INTENT_MODE_FULL,
+                reproposal_reason=(
+                    "Lightweight section discovered structured surfaces; "
+                    "re-propose under full intent mode."
+                ),
             )
 
-        if intent_mode == "full":
+        if intent_mode == INTENT_MODE_FULL:
             action = run_aligned_expansion(
                 section_number, planspace, codespace, parent,
                 intent_budgets, expansion_counts,
             )
             if action is None:
-                return ACTION_ABORT, intent_mode, None
+                return SurfaceActionResult(action=ACTION_ABORT, intent_mode=intent_mode)
             if action == ACTION_CONTINUE:
-                return (
-                    ACTION_CONTINUE,
-                    intent_mode,
-                    "Intent expanded; re-propose against "
-                    "updated problem/philosophy definitions.",
+                return SurfaceActionResult(
+                    action=ACTION_CONTINUE,
+                    intent_mode=intent_mode,
+                    reproposal_reason=(
+                        "Intent expanded; re-propose against "
+                        "updated problem/philosophy definitions."
+                    ),
                 )
 
     Services.logger().log(f"Section {section_number}: integration proposal ALIGNED")
@@ -153,7 +167,7 @@ def handle_aligned_surfaces(
         parent,
         f"summary:proposal-align:{section_number}:ALIGNED",
     )
-    return "break", intent_mode, None
+    return SurfaceActionResult(action="break", intent_mode=intent_mode)
 
 
 def handle_misaligned_surfaces(
@@ -185,7 +199,7 @@ def handle_misaligned_surfaces(
         f"Section {section_number}: persisted intent "
         f"surfaces from misaligned pass"
     )
-    if intent_mode != "full":
+    if intent_mode != INTENT_MODE_FULL:
         Services.logger().log(
             f"Section {section_number}: lightweight mode discovered "
             f"{misaligned_surface_count} structured surfaces on "
@@ -197,9 +211,9 @@ def handle_misaligned_surfaces(
             "structured_surfaces_on_lightweight_misaligned",
             misaligned_surface_count,
         )
-        intent_mode = "full"
+        intent_mode = INTENT_MODE_FULL
 
-    if intent_mode == "full" and _has_definition_gap_surfaces(
+    if intent_mode == INTENT_MODE_FULL and _has_definition_gap_surfaces(
         misaligned_surfaces,
     ):
         run_misaligned_expansion(

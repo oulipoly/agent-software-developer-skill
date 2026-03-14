@@ -9,9 +9,8 @@ from typing import Any
 from orchestrator.path_registry import PathRegistry
 from orchestrator.repository.section_artifacts import write_section_input_artifact
 from implementation.repository.roal_index import refresh_roal_input_index
-from proposal.repository.state import load_proposal_state
+from proposal.repository.state import ProposalState, load_proposal_state
 from risk.service.engagement import determine_engagement
-from risk.engine.risk_assessor import run_lightweight_risk_check
 from risk.service.package_builder import build_package_from_proposal
 
 _RAW_RISK_EXPLORATION_THRESHOLD = 60
@@ -21,7 +20,7 @@ from risk.types import EngagementContext, RiskAssessment, RiskMode, RiskPackage,
 from scan.service.section_loader import parse_related_files
 from containers import Services
 from implementation.service.section_reexplorer import reexplore_section
-from implementation.engine.section_pipeline import run_section
+from orchestrator.engine.section_pipeline import run_section
 from orchestrator.types import ProposalPassResult, Section
 from dispatch.types import ALIGNMENT_CHANGED_PENDING
 from signals.types import PASS_MODE_PROPOSAL, SIGNAL_NEEDS_PARENT
@@ -115,7 +114,7 @@ def _resolve_triage_engagement(
     paths: PathRegistry,
     sec_num: str,
     advisory_package: RiskPackage,
-    proposal_state: dict,
+    proposal_state: ProposalState,
 ) -> RiskMode:
     triage_signal = Services.artifact_io().read_json(paths.intent_triage_signal(sec_num))
     triage_confidence = "low"
@@ -128,9 +127,9 @@ def _resolve_triage_engagement(
 
     return determine_engagement(
         step_count=len(advisory_package.steps),
-        file_count=max(len(proposal_state.get("resolved_contracts", [])), 1),
+        file_count=max(len(proposal_state.resolved_contracts), 1),
         ctx=EngagementContext(
-            has_shared_seams=bool(proposal_state.get("shared_seam_candidates")),
+            has_shared_seams=bool(proposal_state.shared_seam_candidates),
         ),
         triage_confidence=triage_confidence,
         risk_mode_hint=risk_mode_hint,
@@ -217,7 +216,7 @@ def _risk_check_proposal(
         risk_mode = _resolve_triage_engagement(
             paths, sec_num, advisory_package, proposal_state,
         )
-        run_lightweight_risk_check(
+        Services.risk_assessment().run_lightweight_check(
             planspace,
             advisory_scope,
             "proposal",
