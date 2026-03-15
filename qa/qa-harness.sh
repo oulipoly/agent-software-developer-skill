@@ -34,6 +34,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 WORKFLOW_HOME="$(dirname "$SCRIPT_DIR")"
 export WORKFLOW_HOME
 
+# Slug contract: the harness passes --slug to the runner, which forces the
+# planspace path to ~/.claude/workspaces/$SLUG.  run-metadata.json written by
+# the runner is the machine-readable contract confirming the slug was honored.
 DB_SH="$SCRIPT_DIR/db.sh"
 PLANSPACE="$HOME/.claude/workspaces/$SLUG"
 DB_PATH="$PLANSPACE/run.db"
@@ -51,8 +54,8 @@ QA_START_ISO="$(date -Iseconds)"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="$ANSWER_KEY/runs/$RUN_ID"
 
-# Timeout: 2 hours max
-TIMEOUT_SECONDS=7200
+# No timeout — the run completes when the workflow agent exits or the budget is exhausted.
+TIMEOUT_SECONDS=0
 
 echo "═══════════════════════════════════════════════════"
 echo "  QA Harness — $SLUG"
@@ -62,7 +65,7 @@ echo "  Spec:        $SPEC_PATH"
 echo "  Answer key:  $ANSWER_KEY"
 echo "  Planspace:   $PLANSPACE"
 echo "  Run output:  $RUN_DIR"
-echo "  Timeout:     ${TIMEOUT_SECONDS}s"
+echo "  Timeout:     $([ "$TIMEOUT_SECONDS" -gt 0 ] && echo "${TIMEOUT_SECONDS}s" || echo "none (budget-limited)")"
 echo "═══════════════════════════════════════════════════"
 
 # ── Preflight ─────────────────────────────────────────────────────────
@@ -107,7 +110,11 @@ WORKFLOW_PID_FILE="$RUN_DIR/workflow.pid"
   claude -p \
     --permission-mode bypassPermissions \
     --max-budget-usd 50 \
-    "/workflow $SPEC_PATH" \
+    "Run the implementation pipeline via the canonical runner:
+
+python -m pipeline ~/.claude/workspaces/$SLUG $CODESPACE --spec $SPEC_PATH --slug $SLUG --qa-mode
+
+Do not use /workflow. Execute the command above directly." \
     > "$WORKFLOW_LOG" 2>&1
   echo $? > "$RUN_DIR/workflow.exit"
 ) &
@@ -131,9 +138,40 @@ while [ ! -f "$DB_PATH" ] && [ $WAIT_COUNT -lt 120 ]; do
 done
 
 if [ ! -f "$DB_PATH" ]; then
-  echo "  ERROR: Planspace not created after 120s"
-  kill "$WORKFLOW_PID" 2>/dev/null || true
-  exit 1
+  # Fallback: the runner may have created the planspace under a different name.
+  # Search run-metadata.json files for one that matches our slug or codespace.
+  echo "  Expected planspace not found. Searching for matching run-metadata.json..."
+  FOUND_PLANSPACE=""
+  for meta in "$HOME"/.claude/workspaces/*/artifacts/run-metadata.json; do
+    [ -f "$meta" ] || continue
+    # Check if the metadata contains our slug or codespace path
+    if python3 -c "
+import json, sys
+m = json.load(open('$meta'))
+if m.get('slug') == '$SLUG' or m.get('codespace') == '$CODESPACE':
+    sys.exit(0)
+sys.exit(1)
+" 2>/dev/null; then
+      FOUND_PLANSPACE="$(dirname "$(dirname "$meta")")"
+      break
+    fi
+  done
+
+  if [ -n "$FOUND_PLANSPACE" ]; then
+    echo "  Found matching planspace via run-metadata.json: $FOUND_PLANSPACE"
+    PLANSPACE="$FOUND_PLANSPACE"
+    DB_PATH="$PLANSPACE/run.db"
+    # Re-check that run.db actually exists at the discovered path
+    if [ ! -f "$DB_PATH" ]; then
+      echo "  ERROR: run-metadata.json matched but run.db missing at $DB_PATH"
+      kill "$WORKFLOW_PID" 2>/dev/null || true
+      exit 1
+    fi
+  else
+    echo "  ERROR: Planspace not created after 120s (no matching run-metadata.json found)"
+    kill "$WORKFLOW_PID" 2>/dev/null || true
+    exit 1
+  fi
 fi
 
 echo "  Planspace created at: $(date -Iseconds)"
@@ -313,12 +351,14 @@ for sec, cnt in counts.items():
       log_finding "HEARTBEAT" "-" "events:$EVT_COUNT agents:$AGENT_COUNT findings:$FINDING_COUNT elapsed:${ELAPSED}s"
     fi
 
-    # ── Timeout check ──
-    ELAPSED=$(( $(date +%s) - START_TIME ))
-    if [ "$ELAPSED" -gt "$TIMEOUT_SECONDS" ]; then
-      log_finding "ABORT" "TIMEOUT" "QA harness timeout after ${ELAPSED}s"
-      kill "$WORKFLOW_PID" 2>/dev/null || true
-      break
+    # ── Timeout check (disabled when TIMEOUT_SECONDS=0) ──
+    if [ "$TIMEOUT_SECONDS" -gt 0 ]; then
+      ELAPSED=$(( $(date +%s) - START_TIME ))
+      if [ "$ELAPSED" -gt "$TIMEOUT_SECONDS" ]; then
+        log_finding "ABORT" "TIMEOUT" "QA harness timeout after ${ELAPSED}s"
+        kill "$WORKFLOW_PID" 2>/dev/null || true
+        break
+      fi
     fi
 
     sleep 15
